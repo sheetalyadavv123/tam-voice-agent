@@ -1,0 +1,59 @@
+{
+  "customers": [
+    {
+      "id": "C001", "name": "Rahul Sharma", "phone": "+919000000001", "dob": "1990-05-14",
+      "loan": {"status": "active", "type": "Personal loan", "emi_amount": 4500,
+               "due_date": "2026-10-28", "overdue_days": 0, "outstanding": 86000,
+               "last_payment_date": "2026-09-27"}
+    },
+    {
+      "id": "C002", "name": "Sunita Verma", "phone": "+919000000002", "dob": "1985-11-02",
+      "loan": {"status": "active", "type": "Two-wheeler loan", "emi_amount": 2200,
+               "due_date": "2026-09-10", "overdue_days": 44, "outstanding": 41500,
+               "last_payment_date": "2026-08-10"}
+    },
+    {
+      "id": "C003", "name": "Amit Kumar", "phone": "+919000000003", "dob": "1978-03-22",
+      "loan": {"status": "active", "type": "Home loan", "emi_amount": 28400,
+               "due_date": "2026-11-05", "overdue_days": 0, "outstanding": 2845000,
+               "last_payment_date": "2026-10-05"}
+    },
+    {
+      "id": "C004", "name": "Priya Nair", "phone": "+919000000004", "dob": "1993-07-30",
+      "loan": {"status": "active", "type": "Personal loan", "emi_amount": 3200,
+               "due_date": "2026-10-10", "overdue_days": 16, "outstanding": 52400,
+               "last_payment_date": "2026-09-10",
+               "payment_in_reconciliation": {"amount": 3200, "received_date": "2026-10-24"}}
+    },
+    {
+      "id": "C005", "name": "Rahul Sarma", "phone": "+919000000005", "dob": "1991-01-09",
+      "loan": {"status": "active", "type": "Personal loan", "emi_amount": 5100,
+               "due_date": "2026-11-02", "overdue_days": 0, "outstanding": 112000,
+               "last_payment_date": "2026-10-02"}
+    },
+    {
+      "id": "C006", "name": "Subramaniam Venkataraghavan", "phone": "+919000000006", "dob": "1982-09-17",
+      "loan": {"status": "active", "type": "Education loan", "emi_amount": 6750,
+               "due_date": "2026-11-01", "overdue_days": 0, "outstanding": 395500,
+               "last_payment_date": "2026-10-01"}
+    },
+    {
+      "id": "C007", "name": "कविता देवी", "phone": "+919000000007", "dob": "1988-12-25",
+      "loan": {"status": "active", "type": "Business loan", "emi_amount": 15000,
+               "due_date": "2026-10-19", "overdue_days": 7, "outstanding": 640000,
+               "last_payment_date": "2026-09-19"}
+    },
+    {
+      "id": "C008", "name": "Mohammed Irfan Qureshi", "phone": "+919000000008", "dob": "1975-06-03",
+      "loan": {"status": "active", "type": "Gold loan", "emi_amount": 1800,
+               "due_date": "2026-07-22", "overdue_days": 95, "outstanding": 27300,
+               "last_payment_date": "2026-06-22"}
+    },
+    {
+      "id": "C009", "name": "Neha Gupta", "phone": "+919000000009", "dob": "1996-04-11",
+      "loan": {"status": "closed", "type": "Personal loan", "emi_amount": 0,
+               "due_date": null, "overdue_days": 0, "outstanding": 0,
+               "last_payment_date": "2026-08-15"}
+    }
+  ]
+}
