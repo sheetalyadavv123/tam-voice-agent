@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Saved conversations and test audio (may contain personal data)
+transcripts/
+*.mp3
+*.wav
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
