@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Let this file import the "tools" folder in the project root
@@ -20,6 +20,7 @@ from tools import loan_tools
 logger = logging.getLogger("tam-voice-agent")
 PROMPT = (Path(__file__).parent.parent / "prompts" / "system.md").read_text(encoding="utf-8")
 TRANSCRIPT_DIR = Path(__file__).parent.parent / "transcripts"
+MAX_INVALID_DATES = 3
 
 
 def build_llm():
@@ -42,6 +43,7 @@ class Assistant(Agent):
     def __init__(self, call: loan_tools.Session, call_note: str):
         super().__init__(instructions=PROMPT + call_note)
         self.call = call  # this call's notepad (customer, verified, attempts)
+        self.invalid_dates = 0  # impossible dates heard in a row
 
     @function_tool()
     async def verify_identity(self, context: RunContext, day: int, month: int, year: int) -> dict:
@@ -52,18 +54,25 @@ class Assistant(Agent):
         Args:
             day: Day of the month, 1-31. For "second November nineteen eighty five" this is 2.
             month: Month number, 1-12. November is 11.
-            year: Full four-digit year. "nineteen eighty five" is 1985.
+            year: The year as four digits, e.g. 1985 for "nineteen eighty five". If the
+                caller gives only two digits, ask them for the full year.
         """
         # Build the date in code: small LLMs often mis-format date strings.
-        try:
-            dob = date(year, month, day).isoformat()
-        except ValueError:
-            logger.info("TOOL verify_identity invalid date day=%s month=%s year=%s", day, month, year)
-            return {"verified": False, "error": "invalid_date", "hint": "Ask the caller to repeat it."}
+        dob = loan_tools.build_dob(day, month, year)
+        if dob is None:
+            self.invalid_dates += 1
+            logger.info("TOOL verify_identity invalid_date count=%s", self.invalid_dates)
+            if self.invalid_dates >= MAX_INVALID_DATES:
+                return {"verified": False, "error": "invalid_date",
+                        "hint": "Stop asking. Offer to transfer the caller to a human agent."}
+            return {"verified": False, "error": "invalid_date",
+                    "hint": "Ask the caller to repeat their full date of birth."}
+        self.invalid_dates = 0
         # Filler so the caller isn't left in silence while the next LLM turn runs
         context.session.say("एक moment, मैं check करती हूँ।", add_to_chat_ctx=False)
         result = loan_tools.verify_identity(self.call, dob)
-        logger.info("TOOL verify_identity(%s) -> %s", dob, result)
+        logger.info("TOOL verify_identity attempt=%s verified=%s",
+                    self.call.attempts, result.get("verified"))
         if result.get("verified"):
             # Return the loan details now to save a second tool round trip
             result["loan"] = loan_tools.get_loan_status(self.call)

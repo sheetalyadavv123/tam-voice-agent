@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "data" / "mock_db.json"
@@ -30,6 +31,17 @@ def _last10(phone: str) -> str:
 
 def _get(customer_id):
     return next((c for c in _customers() if c["id"] == customer_id), None)
+
+
+
+def build_dob(day, month, year):
+    """Return 'YYYY-MM-DD', or None if the date is impossible."""
+    try:
+        if not 1900 <= int(year) <= date.today().year:
+            return None
+        return date(int(year), int(month), int(day)).isoformat()
+    except (ValueError, TypeError):
+        return None
 
 
 

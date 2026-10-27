@@ -1,5 +1,5 @@
 from tools.loan_tools import (
-    Session, _customers, find_customer, verify_identity,
+    Session, _customers, build_dob, find_customer, verify_identity,
     get_loan_status, record_outcome, transfer_to_human,
 )
 
@@ -77,3 +77,15 @@ def test_mock_data_is_sane():
     customers = _customers()
     assert len({c["id"] for c in customers}) == len(customers)
     assert len({c["phone"] for c in customers}) == len(customers)
+
+
+def test_build_dob_valid():
+    assert build_dob(2, 11, 1985) == "1985-11-02"
+
+
+def test_build_dob_impossible_date():
+    assert build_dob(31, 2, 1990) is None
+
+
+def test_build_dob_two_digit_year_rejected():
+    assert build_dob(14, 5, 90) is None
