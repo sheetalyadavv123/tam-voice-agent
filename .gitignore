@@ -17,3 +17,5 @@ transcripts/
 *.log
 .DS_Store
 Thumbs.db
+secrets.env
+logs/

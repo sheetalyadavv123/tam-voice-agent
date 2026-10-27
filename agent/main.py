@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from livekit import agents
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
-from livekit.plugins import deepgram, elevenlabs, google, openai, silero
+from livekit.plugins import deepgram, elevenlabs, google, openai, sarvam, silero
 
 import config
 import db
@@ -26,6 +26,13 @@ def build_llm():
     if config.LLM_PROVIDER == "openai":
         return openai.LLM(model=config.LLM_MODEL)
     return google.LLM(model=config.LLM_MODEL)
+
+
+def build_tts():
+    if config.TTS_PROVIDER == "sarvam":
+        return sarvam.TTS(target_language_code=config.SARVAM_LANGUAGE, model="bulbul:v3",
+                          speaker=config.SARVAM_SPEAKER)
+    return elevenlabs.TTS(model=config.TTS_MODEL, voice_id=config.TTS_VOICE_ID)
 
 
 class Assistant(Agent):
@@ -86,7 +93,7 @@ async def entrypoint(ctx: agents.JobContext):
     session = AgentSession(
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE),
         llm=build_llm(),
-        tts=elevenlabs.TTS(model=config.TTS_MODEL, voice_id=config.TTS_VOICE_ID),
+        tts=build_tts(),
         vad=silero.VAD.load(),
     )
 
