@@ -15,6 +15,7 @@ from livekit.plugins import deepgram, elevenlabs, google, openai, sarvam, silero
 
 import config
 import db
+from latency import LatencyLog
 from tools import loan_tools
 
 logger = logging.getLogger("tam-voice-agent")
@@ -127,8 +128,11 @@ async def entrypoint(ctx: agents.JobContext):
         vad=silero.VAD.load(),
         preemptive_generation=True,  # start the LLM before end-of-turn is confirmed
     )
+    latency = LatencyLog()
+    latency.attach(session)
 
     async def save_transcript():
+        latency.summary()
         ended_at = datetime.now(timezone.utc)
         turns = db.extract_turns(session.history)
         if not turns:
