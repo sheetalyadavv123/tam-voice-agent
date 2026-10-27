@@ -59,6 +59,9 @@ class MemoryStore:
     def attempt_times(self, customer_id):
         return [a["at"] for a in self._attempts if a["customer_id"] == customer_id]
 
+    def attempts_for(self, customer_id):
+        return [dict(a) for a in self._attempts if a["customer_id"] == customer_id]
+
     # ---- promises to pay ----
     def add_promise(self, customer_id, promised_date, amount, session_id=None):
         """Saving the same open promise twice returns the first one (duplicate=True)."""
@@ -75,6 +78,13 @@ class MemoryStore:
     def promises_for(self, customer_id, status=None):
         return [dict(p) for p in self._promises
                 if p["customer_id"] == customer_id and (status is None or p["status"] == status)]
+
+    def add_payment(self, customer_id, amount, received_on, status="posted"):
+        """Stands in for the company's accounts system recording a payment."""
+        p = {"customer_id": customer_id, "amount": amount,
+             "received_on": received_on, "status": status}
+        self._payments.append(p)
+        return dict(p)
 
     def promises_due_on(self, day, status="open"):
         return [dict(p) for p in self._promises

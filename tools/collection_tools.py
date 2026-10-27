@@ -197,6 +197,9 @@ class Call:
             return {"saved": False, "reason": check["reason"], "next": nxt}
         saved = self.store.add_promise(
             self.customer_id, check["date"], loan["emi_amount"], self.session_id)
+        for other in self.store.promises_for(self.customer_id, "open"):
+            if other["id"] != saved["id"]:
+                self.store.set_promise_status(other["id"], "cancelled")
         self.promise_recorded = True
         return {"saved": True, "date": check["date"].isoformat(), "amount": saved["amount"],
                 "duplicate": saved["duplicate"], "next": "confirm_the_date_and_close"}
