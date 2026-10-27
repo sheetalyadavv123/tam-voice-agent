@@ -24,7 +24,10 @@ TRANSCRIPT_DIR = Path(__file__).parent.parent / "transcripts"
 
 def build_llm():
     if config.LLM_PROVIDER == "openai":
-        return openai.LLM(model=config.LLM_MODEL)
+        extra = {}
+        if config.LLM_REASONING_EFFORT:
+            extra["reasoning_effort"] = config.LLM_REASONING_EFFORT
+        return openai.LLM(model=config.LLM_MODEL, **extra)
     return google.LLM(model=config.LLM_MODEL)
 
 
