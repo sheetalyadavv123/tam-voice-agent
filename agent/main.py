@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 # Let this file import the "tools" folder in the project root
@@ -44,11 +44,29 @@ class Assistant(Agent):
         self.call = call  # this call's notepad (customer, verified, attempts)
 
     @function_tool()
-    async def verify_identity(self, context: RunContext, date_of_birth: str) -> dict:
-        """Verify the caller's identity. Pass the date of birth the caller said,
-        converted to YYYY-MM-DD."""
-        result = loan_tools.verify_identity(self.call, date_of_birth)
-        logger.info("TOOL verify_identity -> %s", result)
+    async def verify_identity(self, context: RunContext, day: int, month: int, year: int) -> dict:
+        """Verify the caller's identity using the date of birth they said.
+        If verified, the result also includes the caller's loan details, so you
+        do not need to call get_loan_status afterwards.
+
+        Args:
+            day: Day of the month, 1-31. For "second November nineteen eighty five" this is 2.
+            month: Month number, 1-12. November is 11.
+            year: Full four-digit year. "nineteen eighty five" is 1985.
+        """
+        # Build the date in code: small LLMs often mis-format date strings.
+        try:
+            dob = date(year, month, day).isoformat()
+        except ValueError:
+            logger.info("TOOL verify_identity invalid date day=%s month=%s year=%s", day, month, year)
+            return {"verified": False, "error": "invalid_date", "hint": "Ask the caller to repeat it."}
+        # Filler so the caller isn't left in silence while the next LLM turn runs
+        context.session.say("एक moment, मैं check करती हूँ।", add_to_chat_ctx=False)
+        result = loan_tools.verify_identity(self.call, dob)
+        logger.info("TOOL verify_identity(%s) -> %s", dob, result)
+        if result.get("verified"):
+            # Return the loan details now to save a second tool round trip
+            result["loan"] = loan_tools.get_loan_status(self.call)
         return result
 
     @function_tool()
@@ -98,6 +116,7 @@ async def entrypoint(ctx: agents.JobContext):
         llm=build_llm(),
         tts=build_tts(),
         vad=silero.VAD.load(),
+        preemptive_generation=True,  # start the LLM before end-of-turn is confirmed
     )
 
     async def save_transcript():
