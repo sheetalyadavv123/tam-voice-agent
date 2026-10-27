@@ -54,6 +54,18 @@
       "loan": {"status": "closed", "type": "Personal loan", "emi_amount": 0,
                "due_date": null, "overdue_days": 0, "outstanding": 0,
                "last_payment_date": "2026-08-15"}
+    },
+        {
+      "id": "C010", "name": "Deepak Joshi", "phone": "+919000000010", "dob": "1987-02-18",
+      "loan": {"status": "active", "type": "Personal loan", "emi_amount": 3800,
+               "due_date": "2026-10-05", "overdue_days": 22, "outstanding": 61000,
+               "last_payment_date": "2026-09-05"}
+    },
+    {
+      "id": "C011", "name": "Anil Mehta", "phone": "+919000000011", "dob": "1980-08-08",
+      "loan": {"status": "active", "type": "Personal loan", "emi_amount": 5400,
+               "due_date": "2026-10-20", "overdue_days": 7, "outstanding": 74500,
+               "last_payment_date": "2026-09-20"}
     }
   ]
 }

@@ -1,0 +1,15 @@
+{
+  "defaults": {"language": "hi", "do_not_call": false},
+  "overrides": {
+    "C003": {"language": "en"},
+    "C010": {"do_not_call": true}
+  },
+  "payments_feed": [
+    {"customer_id": "C004", "amount": 3200, "received_on": "2026-10-24", "status": "reconciling"},
+    {"customer_id": "C003", "amount": 28400, "received_on": "2026-10-27", "status": "posted"}
+  ],
+  "open_promises": [
+    {"customer_id": "C011", "promised_date": "2026-10-27", "amount": 5400},
+    {"customer_id": "C003", "promised_date": "2026-10-27", "amount": 28400}
+  ]
+}

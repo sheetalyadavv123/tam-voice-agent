@@ -22,3 +22,47 @@ CREATE TABLE IF NOT EXISTS call_turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_session ON call_turns (session_id);
+
+CREATE TABLE IF NOT EXISTS call_attempts (
+    id BIGSERIAL PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    attempted_at TIMESTAMPTZ NOT NULL,
+    session_id UUID,
+    kind TEXT NOT NULL DEFAULT 'reminder' CHECK (kind IN ('reminder', 'followup')),
+    outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_attempts_customer ON call_attempts (customer_id, attempted_at);
+
+CREATE TABLE IF NOT EXISTS promises (
+    id BIGSERIAL PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    promised_date DATE NOT NULL,
+    amount INT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'kept', 'broken', 'cancelled')),
+    session_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_open_promise
+    ON promises (customer_id, promised_date) WHERE status = 'open';
+
+CREATE TABLE IF NOT EXISTS payment_links (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    amount INT NOT NULL,
+    url TEXT NOT NULL,
+    channel TEXT NOT NULL CHECK (channel IN ('sms', 'whatsapp')),
+    status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'paid', 'failed', 'expired')),
+    session_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    paid_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS callbacks (
+    id BIGSERIAL PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    due_at TIMESTAMPTZ NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'cancelled')),
+    session_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
