@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal  # noqa: F401  (kept for tool signatures)
 
@@ -224,15 +224,19 @@ async def entrypoint(ctx: agents.JobContext):
     today = rules.now_ist()
     loan = customer["loan"]
     due = date.fromisoformat(loan["due_date"])
+    upcoming = ", ".join(
+        f"{d:%A} {d.day} {d:%B}"
+        for d in (today.date() + timedelta(days=i) for i in range(1, 8)))
     note = (f"\n\n# This call\nCustomer first name: {call.first_name}\n"
-            f"Today: {today:%A, %d %B %Y} (IST)\n"
+            f"Today: {today:%A} {today.day} {today:%B %Y} (IST)\n"
             f"Start in: {language}\nCall type: {what}\n"
             f"EMI amount due: ₹{loan['emi_amount']:,}\n"
-            f"EMI was due on: {due:%d %B %Y}\n"
-            "When the customer names a weekday, it means the next one from today. "
-            "Work out the date yourself and confirm it, don't ask them for it.\n"
-            "Only say amounts and dates that appear in this section. "
-            "Never invent, round or guess a number.\n")
+            f"EMI was due on: {due.day} {due:%B %Y}\n"
+            f"Next 7 days: {upcoming}\n"
+            "If the customer names a weekday, take its date from 'Next 7 days' and confirm it. "
+            "Don't ask them for the date.\n"
+            "Write every amount and date in digits exactly as shown here, like ₹2,200 and "
+            "30 October. Never write numbers as words. Never invent or round a number.\n")
 
     session = AgentSession(
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE),
