@@ -273,8 +273,13 @@ async def entrypoint(ctx: agents.JobContext):
             ),
         ),
     )
-    await session.generate_reply(
-        instructions="Start the call now. Follow the Opening section of your instructions.")
+    if call.language == "hi":
+        greeting = (f"नमस्ते, मैं {config.COMPANY_NAME} की AI असिस्टेंट बोल रही हूँ। "
+                    f"यह कॉल रिकॉर्ड हो सकती है। क्या मेरी बात {call.first_name} जी से हो रही है?")
+    else:
+        greeting = (f"Hello, this is the AI assistant from {config.COMPANY_NAME}. "
+                    f"This call may be recorded. Am I speaking with {call.first_name}?")
+    await session.say(greeting)
 
 
 if __name__ == "__main__":
