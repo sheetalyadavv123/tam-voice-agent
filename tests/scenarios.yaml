@@ -1,0 +1,128 @@
+- name: pays_now
+  customer: C002
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true, next: give_reminder}}
+    - {call: get_due_details, expect: {emi_amount: 2200, overdue_days: 44}, expect_absent: [outstanding, dob]}
+    - {call: send_payment_link, args: {channel: sms}, expect: {sent: true, amount: 2200, to_number_ending: "0002"}, expect_absent: [url]}
+    - {call: check_payment_status, expect: {status: pending}}
+    - {world: pay_link}
+    - {call: check_payment_status, expect: {status: paid, source: payment_link}}
+    - {call: record_outcome, args: {outcome: paid_now}, expect: {saved: true}}
+  final:
+    summary: {outcome: paid_now, payment_confirmed: true}
+    promises: {open: 0}
+
+- name: promises_a_date
+  customer: C007
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true}}
+    - {call: get_due_details, expect: {emi_amount: 15000, overdue_days: 7}}
+    - {call: record_promise_to_pay, args: {day: 30, month: 10, year: 2026}, expect: {saved: true, date: "2026-10-30", amount: 15000}}
+    - {call: record_outcome, args: {outcome: promise_to_pay}, expect: {saved: true}}
+  final:
+    summary: {outcome: promise_to_pay, promise_recorded: true}
+    promises: {open: 1}
+
+- name: already_paid_being_processed
+  customer: C004
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true}}
+    - {call: check_payment_status, expect: {status: reconciling, amount: 3200}}
+    - {call: record_outcome, args: {outcome: already_paid_confirmed}, expect: {saved: true}}
+  final:
+    summary: {outcome: already_paid_confirmed}
+    promises: {open: 0}
+
+- name: already_paid_but_not_in_records
+  customer: C005
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true}}
+    - {call: check_payment_status, expect: {status: none}}
+    - {call: record_outcome, args: {outcome: already_paid_confirmed}, expect: {saved: false, error: not_supported_by_records}}
+    - {call: record_outcome, args: {outcome: already_paid_unconfirmed, note: "customer says paid, no record"}, expect: {saved: true}}
+    - {call: transfer_to_human, args: {reason: "payment dispute"}, expect: {requested: true}}
+  final:
+    summary: {outcome: already_paid_unconfirmed, handoff_requested: true}
+    callbacks_open: 1
+
+- name: family_member_answers
+  customer: C001
+  steps:
+    - {call: report_person, args: {status: third_party}, expect: {ok: true, next: share_nothing_and_end_politely}}
+    - {call: get_due_details, expect: {error: not_unlocked}}
+    - {call: send_payment_link, args: {channel: sms}, expect: {error: not_unlocked}}
+    - {call: record_promise_to_pay, args: {day: 30, month: 10, year: 2026}, expect: {error: not_unlocked}}
+    - {call: report_person, args: {status: customer}, expect: {ok: false, reason: already_third_party}}
+    - {call: record_outcome, args: {outcome: third_party}, expect: {saved: true}}
+  final:
+    summary: {outcome: third_party, person_status: third_party}
+    promises: {open: 0}
+
+- name: customer_unavailable_callback
+  customer: C001
+  steps:
+    - {call: report_person, args: {status: unavailable}, expect: {ok: true, next: ask_when_to_call_back}}
+    - {call: schedule_callback, args: {day: 29, month: 10, year: 2026, hour: 10, minute: 0, reason: customer_unavailable}, expect: {saved: true}}
+    - {call: record_outcome, args: {outcome: not_available}, expect: {saved: true}}
+  final:
+    summary: {outcome: not_available, callback_scheduled: true}
+    callbacks_open: 1
+
+- name: wrong_number
+  customer: C006
+  steps:
+    - {call: report_person, args: {status: third_party}, expect: {ok: true}}
+    - {call: get_due_details, expect: {error: not_unlocked}}
+    - {call: record_outcome, args: {outcome: wrong_number}, expect: {saved: true}}
+  final:
+    summary: {outcome: wrong_number}
+
+- name: hardship_and_distress
+  customer: C008
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true}}
+    - {call: get_due_details, expect: {emi_amount: 1800, overdue_days: 95}}
+    - {call: record_outcome, args: {outcome: hardship}, expect: {saved: true}}
+    - {call: transfer_to_human, args: {reason: "customer reports hardship"}, expect: {requested: true}}
+  final:
+    summary: {outcome: hardship, handoff_requested: true}
+    callbacks_open: 1
+
+- name: promise_too_far_goes_to_human
+  customer: C002
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true}}
+    - {call: record_promise_to_pay, args: {day: 20, month: 11, year: 2026}, expect: {saved: false, reason: too_far, next: offer_human_callback}}
+    - {call: record_promise_to_pay, args: {day: 31, month: 2, year: 2026}, expect: {saved: false, reason: impossible_date}}
+    - {call: transfer_to_human, args: {reason: "wants a later date"}, expect: {requested: true}}
+  final:
+    summary: {outcome: human_callback, promise_recorded: false}
+    promises: {open: 0}
+    callbacks_open: 1
+
+- name: loan_already_closed
+  customer: C009
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true}}
+    - {call: get_due_details, expect: {loan_closed: true}, expect_absent: [emi_amount]}
+    - {call: send_payment_link, args: {channel: sms}, expect: {sent: false, reason: no_payment_due}}
+    - {call: record_promise_to_pay, args: {day: 30, month: 10, year: 2026}, expect: {saved: false, reason: no_payment_due}}
+    - {call: record_outcome, args: {outcome: no_resolution, note: "loan closed"}, expect: {saved: true}}
+  final:
+    summary: {outcome: no_resolution}
+    promises: {open: 0}
+
+- name: dob_mode_impossible_dates
+  customer: C002
+  mode: name_plus_dob
+  steps:
+    - {call: report_person, args: {status: customer}, expect: {ok: true, next: ask_date_of_birth}}
+    - {call: get_due_details, expect: {error: not_unlocked}}
+    - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {error: impossible_date}}
+    - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {error: impossible_date}}
+    - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {locked: true}}
+    - {call: get_due_details, expect: {error: not_unlocked}}
+    - {call: transfer_to_human, args: {reason: "could not verify"}, expect: {requested: true}}
+  final:
+    summary: {handoff_requested: true, dob_verified: false}
+    callbacks_open: 1
