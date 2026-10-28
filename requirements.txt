@@ -43,6 +43,7 @@ livekit-blingfire==1.2.0
 livekit-local-inference==0.2.7
 livekit-plugins-deepgram==1.8.9
 livekit-plugins-elevenlabs==1.8.9
+livekit-plugins-noise-cancellation==0.3.2
 livekit-plugins-google==1.8.9
 livekit-plugins-openai==1.8.9
 livekit-plugins-sarvam==1.8.9

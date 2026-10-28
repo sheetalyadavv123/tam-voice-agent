@@ -12,9 +12,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from livekit import agents
 from livekit.agents import (
-    Agent, AgentSession, MetricsCollectedEvent, RunContext, function_tool, metrics,
+    Agent, AgentSession, MetricsCollectedEvent, RunContext, function_tool, metrics, room_io,
 )
-from livekit.plugins import deepgram, elevenlabs, google, openai, sarvam, silero
+from livekit.plugins import (
+    deepgram, elevenlabs, google, noise_cancellation, openai, sarvam, silero,
+)
 
 import config
 import db
@@ -262,7 +264,15 @@ async def entrypoint(ctx: agents.JobContext):
 
     ctx.add_shutdown_callback(finish)
 
-    await session.start(room=ctx.room, agent=Collector(call, BASE_PROMPT + note))
+    await session.start(
+        room=ctx.room,
+        agent=Collector(call, BASE_PROMPT + note),
+        room_options=room_io.RoomOptions(
+            audio_input=room_io.AudioInputOptions(
+                noise_cancellation=noise_cancellation.BVC(),
+            ),
+        ),
+    )
     await session.generate_reply(
         instructions="Start the call now. Follow the Opening section of your instructions.")
 
