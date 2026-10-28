@@ -11,6 +11,9 @@ import config
 
 
 async def main():
+    if config.APP_ENV != "dev":
+        print(f"refusing to run: APP_ENV is {config.APP_ENV!r}, must be 'dev'")
+        sys.exit(1)
     answer = input("This deletes ALL promises, links, callbacks and attempts in the dev "
                    "database. Type RESET to continue: ")
     if answer.strip() != "RESET":
