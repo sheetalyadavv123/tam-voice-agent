@@ -40,7 +40,7 @@ def _blocked(verdict, now, **ids):
     return {"action": "skip", "reason": verdict["reason"], **ids}
 
 
-def run_due_followups(store, now):
+def run_due_followups(store, now, record_attempts=True):
     now = now.astimezone(IST)
     today = now.date()
     actions, planned = [], set()
@@ -69,7 +69,8 @@ def run_due_followups(store, now):
             if not verdict["allowed"]:
                 actions.append(_blocked(verdict, now, **ids))
                 continue
-            store.add_attempt(cid, now, kind="followup")
+            if record_attempts:
+                store.add_attempt(cid, now, kind="followup")
             planned.add(cid)
             actions.append({"action": "call", "kind": "followup", **ids})
 
@@ -93,7 +94,8 @@ def run_due_followups(store, now):
         if not verdict["allowed"]:
             actions.append(_blocked(verdict, now, **ids))
             continue
-        store.add_attempt(cid, now, kind="followup")
+        if record_attempts:
+            store.add_attempt(cid, now, kind="followup")
         store.set_callback_status(cb["id"], "done")
         planned.add(cid)
         actions.append({"action": "call", "kind": "callback", **ids})

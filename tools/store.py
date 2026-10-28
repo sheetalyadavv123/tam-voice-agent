@@ -1,10 +1,12 @@
 """Where collection data lives. Tools talk to a Store, never to files or the database.
 
-MemoryStore keeps everything in memory (tests, local runs; nothing is written to disk).
-A PostgresStore with the same method names comes later.
+MemoryStore keeps everything in memory (tests and local runs).
+PostgresStore (tools/pg_store.py) is a MemoryStore that is loaded from Neon before a
+call and saves its changes afterwards.
 """
 import copy
 import json
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +17,13 @@ LINK_BASE_URL = "https://pay.example.test/l/"  # .test is reserved, so it never 
 CHANNELS = {"sms", "whatsapp"}
 PROMISE_STATUSES = {"open", "kept", "broken", "cancelled"}
 CALLBACK_STATUSES = {"open", "done", "cancelled"}
+
+
+def load_company_data():
+    """The company's own (read-only) records: customers and the payments feed."""
+    customers = json.loads((DATA / "mock_db.json").read_text(encoding="utf-8"))["customers"]
+    seed = json.loads((DATA / "collections_seed.json").read_text(encoding="utf-8"))
+    return customers, seed
 
 
 class MemoryStore:
@@ -28,14 +37,18 @@ class MemoryStore:
         self._promises = []
         self._links = []
         self._callbacks = []
+        self._seq = {"promise": 0, "callback": 0}
         for p in seed.get("open_promises", []):
             self.add_promise(p["customer_id"], date.fromisoformat(p["promised_date"]), p["amount"])
 
     @classmethod
     def from_files(cls, clock=now_ist):
-        customers = json.loads((DATA / "mock_db.json").read_text(encoding="utf-8"))["customers"]
-        seed = json.loads((DATA / "collections_seed.json").read_text(encoding="utf-8"))
+        customers, seed = load_company_data()
         return cls(customers, seed, clock)
+
+    def _next_id(self, kind):
+        self._seq[kind] += 1
+        return self._seq[kind]
 
     # ---- customers and the company's payment records (read-only) ----
     def get_customer(self, customer_id):
@@ -51,10 +64,22 @@ class MemoryStore:
     def payments_for(self, customer_id):
         return [dict(p) for p in self._payments if p["customer_id"] == customer_id]
 
+    def add_payment(self, customer_id, amount, received_on, status="posted"):
+        """Stands in for the company's accounts system recording a payment (memory only)."""
+        p = {"customer_id": customer_id, "amount": amount,
+             "received_on": received_on, "status": status}
+        self._payments.append(p)
+        return dict(p)
+
     # ---- call attempts ----
     def add_attempt(self, customer_id, at, session_id=None, kind="reminder", outcome=None):
         self._attempts.append({"customer_id": customer_id, "at": at, "session_id": session_id,
-                               "kind": kind, "outcome": outcome})
+                               "kind": kind, "outcome": outcome, "loaded": False})
+
+    def set_attempt_outcome(self, session_id, outcome):
+        for a in self._attempts:
+            if session_id is not None and a["session_id"] == session_id:
+                a["outcome"] = outcome
 
     def attempt_times(self, customer_id):
         return [a["at"] for a in self._attempts if a["customer_id"] == customer_id]
@@ -69,7 +94,7 @@ class MemoryStore:
             if (p["customer_id"] == customer_id and p["promised_date"] == promised_date
                     and p["status"] == "open"):
                 return {**p, "duplicate": True}
-        p = {"id": len(self._promises) + 1, "customer_id": customer_id,
+        p = {"id": self._next_id("promise"), "customer_id": customer_id,
              "promised_date": promised_date, "amount": amount, "status": "open",
              "session_id": session_id, "created_at": self._clock()}
         self._promises.append(p)
@@ -78,13 +103,6 @@ class MemoryStore:
     def promises_for(self, customer_id, status=None):
         return [dict(p) for p in self._promises
                 if p["customer_id"] == customer_id and (status is None or p["status"] == status)]
-
-    def add_payment(self, customer_id, amount, received_on, status="posted"):
-        """Stands in for the company's accounts system recording a payment."""
-        p = {"customer_id": customer_id, "amount": amount,
-             "received_on": received_on, "status": status}
-        self._payments.append(p)
-        return dict(p)
 
     def promises_due_on(self, day, status="open"):
         return [dict(p) for p in self._promises
@@ -103,7 +121,7 @@ class MemoryStore:
     def add_payment_link(self, customer_id, amount, channel, session_id=None):
         if channel not in CHANNELS:
             raise ValueError(f"bad channel: {channel}")
-        link_id = f"PL{len(self._links) + 1:04d}"
+        link_id = "PL" + uuid.uuid4().hex[:8]  # unique across calls
         link = {"id": link_id, "customer_id": customer_id, "amount": amount,
                 "url": LINK_BASE_URL + link_id, "channel": channel, "status": "sent",
                 "session_id": session_id, "created_at": self._clock(), "paid_at": None}
@@ -128,7 +146,7 @@ class MemoryStore:
 
     # ---- callbacks ----
     def add_callback(self, customer_id, due_at, reason, session_id=None):
-        cb = {"id": len(self._callbacks) + 1, "customer_id": customer_id, "due_at": due_at,
+        cb = {"id": self._next_id("callback"), "customer_id": customer_id, "due_at": due_at,
               "reason": reason, "status": "open", "session_id": session_id,
               "created_at": self._clock()}
         self._callbacks.append(cb)

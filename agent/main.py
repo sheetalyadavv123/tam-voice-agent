@@ -21,6 +21,7 @@ import db
 from tools import rules
 from tools.collection_tools import AiCallbackReason, Call, Channel, Outcome, PersonStatus
 from tools.store import MemoryStore
+from tools.pg_store import PostgresStore
 
 logger = logging.getLogger("tam-voice-agent")
 ROOT = Path(__file__).parent.parent
@@ -50,9 +51,17 @@ def build_tts():
     return elevenlabs.TTS(model=config.TTS_MODEL, voice_id=config.TTS_VOICE_ID)
 
 
-def make_store():
-    # Step 10 replaces this with the Neon-backed store.
-    return MemoryStore.from_files(clock=rules.now_ist)
+async def build_store(customer_id):
+    """Returns (store, persistent). store is None when we must not place the call."""
+    if config.DATABASE_URL:
+        try:
+            return await PostgresStore.load(config.DATABASE_URL, [customer_id]), True
+        except Exception:
+            logger.exception("could not load data from the database")
+    if config.TEST_MODE or not config.DATABASE_URL:
+        logger.warning("using in-memory data: nothing will be saved between calls")
+        return MemoryStore.from_files(clock=rules.now_ist), False
+    return None, False
 
 
 def pick_target(ctx):
@@ -179,8 +188,12 @@ class Collector(Agent):
 async def entrypoint(ctx: agents.JobContext):
     session_id = uuid.uuid4()
     started_at = datetime.now(timezone.utc)
-    store = make_store()
     customer_id, kind = pick_target(ctx)
+
+    store, persistent = await build_store(customer_id)
+    if store is None:
+        logger.error("database unavailable: not placing the call")
+        return
 
     customer = store.get_customer(customer_id)
     if customer is None:
@@ -195,9 +208,11 @@ async def entrypoint(ctx: agents.JobContext):
         logger.warning("call blocked before speaking: %s", verdict["reason"])
         return
     if config.TEST_MODE:
-        logger.warning("TEST_MODE is on: calling hours and attempt limits are skipped")
+        logger.warning("TEST_MODE is on: calling hours and attempt limits are skipped, "
+                       "and this call is not counted as an attempt")
+    else:
+        store.add_attempt(customer_id, rules.now_ist(), str(session_id), kind)
 
-    store.add_attempt(customer_id, rules.now_ist(), str(session_id), kind)
     call = Call(store, customer_id, session_id=str(session_id), clock=rules.now_ist)
 
     language = "Hindi" if call.language == "hi" else "English"
@@ -217,8 +232,19 @@ async def entrypoint(ctx: agents.JobContext):
     def _on_metrics(ev: MetricsCollectedEvent):
         metrics.log_metrics(ev.metrics)
 
-    async def save_transcript():
+    async def finish():
         ended_at = datetime.now(timezone.utc)
+        store.set_attempt_outcome(str(session_id), call.outcome)
+        if persistent:
+            try:
+                saved = await store.flush()
+                logger.info("saved changes: %s", {k: v for k, v in saved.items() if v})
+            except Exception:
+                logger.exception("could not save call changes, writing JSON fallback")
+                TRANSCRIPT_DIR.mkdir(exist_ok=True)
+                (TRANSCRIPT_DIR / f"{session_id}_changes.json").write_text(
+                    json.dumps(store.changes(), default=str, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
         turns = db.extract_turns(session.history)
         if not turns:
             return
@@ -233,7 +259,7 @@ async def entrypoint(ctx: agents.JobContext):
             (TRANSCRIPT_DIR / f"{session_id}.json").write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    ctx.add_shutdown_callback(save_transcript)
+    ctx.add_shutdown_callback(finish)
 
     await session.start(room=ctx.room, agent=Collector(call, BASE_PROMPT + note))
     await session.generate_reply(
