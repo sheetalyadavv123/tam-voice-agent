@@ -218,8 +218,9 @@ async def entrypoint(ctx: agents.JobContext):
     language = "Hindi" if call.language == "hi" else "English"
     what = ("a follow-up to a promise the customer made earlier"
             if kind == "followup" else "a first reminder")
+    today = rules.now_ist().strftime("%A, %d %B %Y")
     note = (f"\n\n# This call\nCustomer first name: {call.first_name}\n"
-            f"Start in: {language}\nCall type: {what}\n")
+            f"Start in: {language}\nCall type: {what}\nToday's date: {today}\n")
 
     session = AgentSession(
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE),
