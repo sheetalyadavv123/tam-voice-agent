@@ -52,10 +52,11 @@
     - {call: get_due_details, expect: {error: not_unlocked}}
     - {call: send_payment_link, args: {channel: sms}, expect: {error: not_unlocked}}
     - {call: record_promise_to_pay, args: {day: 30, month: 10, year: 2026}, expect: {error: not_unlocked}}
-    - {call: report_person, args: {status: customer}, expect: {ok: false, reason: already_third_party}}
+    - {call: report_person, args: {status: customer}, expect: {"ok": true, "next": "ask_date_of_birth"}}
+    - {call: get_due_details, expect: {error: not_unlocked}}
     - {call: record_outcome, args: {outcome: third_party}, expect: {saved: true}}
   final:
-    summary: {outcome: third_party, person_status: third_party}
+    summary: {outcome: third_party, person_status: customer}
     promises: {open: 0}
 
 - name: customer_unavailable_callback

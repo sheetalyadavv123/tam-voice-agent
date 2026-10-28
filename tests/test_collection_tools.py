@@ -47,7 +47,7 @@ def test_third_party_gets_nothing(store):
     c = make_call(store)
     assert c.report_person("third_party")["next"] == "share_nothing_and_end_politely"
     assert c.get_due_details() == {"error": "not_unlocked"}
-    assert c.report_person("customer")["reason"] == "already_third_party"
+    assert c.report_person("customer")["next"] == "ask_date_of_birth"
     assert c.get_due_details() == {"error": "not_unlocked"}
 
 

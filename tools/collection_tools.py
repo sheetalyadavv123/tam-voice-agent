@@ -35,6 +35,8 @@ class Call:
             raise ValueError(f"unknown customer: {customer_id}")
         self.person_status = None       # customer | third_party | unavailable
         self.dob_verified = False
+        self.person_corrections = 0
+        self.needs_dob = False
         self.dob_attempts = 0
         self.impossible_dates = 0
         self.handoff_requested = False
@@ -62,7 +64,7 @@ class Call:
         """May we talk about the loan? Depends on VERIFICATION_MODE."""
         if self.person_status != "customer":
             return False
-        return policy.VERIFICATION_MODE == "name_only" or self.dob_verified
+        return (policy.VERIFICATION_MODE == "name_only" and not self.needs_dob) or self.dob_verified
 
     def summary(self):
         return {
@@ -82,7 +84,10 @@ class Call:
         if status not in PERSON_STATUSES:
             return {"ok": False, "error": "invalid_status", "allowed": sorted(PERSON_STATUSES)}
         if self.person_status == "third_party" and status == "customer":
-            return {"ok": False, "reason": "already_third_party"}
+            if self.person_corrections >= 1:
+                return {"ok": False, "reason": "already_third_party"}
+            self.person_corrections += 1
+            self.needs_dob = True
         self.person_status = status
         if status == "customer":
             return {"ok": True, "next": "give_reminder" if self.unlocked else "ask_date_of_birth"}
@@ -94,7 +99,7 @@ class Call:
     def verify_identity(self, day, month, year):
         if self.person_status != "customer":
             return {"error": "confirm_person_first"}
-        if policy.VERIFICATION_MODE == "name_only":
+        if policy.VERIFICATION_MODE == "name_only" and not self.needs_dob:
             return {"verified": True, "not_required": True}
         if self.dob_verified:
             return {"verified": True}

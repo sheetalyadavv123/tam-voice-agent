@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal  # noqa: F401  (kept for tool signatures)
 
@@ -99,8 +99,9 @@ class Collector(Agent):
 
         Args:
             status: "customer" if the person confirmed they are the customer; "third_party"
-                if someone else answered, it is a wrong number, or you are not sure;
-                "unavailable" if the customer says they cannot talk right now.
+                if they said they are someone else or it is a wrong number; "unavailable" if
+                the customer says they cannot talk right now. If you could not understand
+                their answer, don't call this yet. Ask once more first.
         """
         return self._run("report_person", self.call.report_person, status)
 
@@ -220,9 +221,18 @@ async def entrypoint(ctx: agents.JobContext):
     language = "Hindi" if call.language == "hi" else "English"
     what = ("a follow-up to a promise the customer made earlier"
             if kind == "followup" else "a first reminder")
-    today = rules.now_ist().strftime("%A, %d %B %Y")
+    today = rules.now_ist()
+    loan = customer["loan"]
+    due = date.fromisoformat(loan["due_date"])
     note = (f"\n\n# This call\nCustomer first name: {call.first_name}\n"
-            f"Start in: {language}\nCall type: {what}\nToday's date: {today}\n")
+            f"Today: {today:%A, %d %B %Y} (IST)\n"
+            f"Start in: {language}\nCall type: {what}\n"
+            f"EMI amount due: ₹{loan['emi_amount']:,}\n"
+            f"EMI was due on: {due:%d %B %Y}\n"
+            "When the customer names a weekday, it means the next one from today. "
+            "Work out the date yourself and confirm it, don't ask them for it.\n"
+            "Only say amounts and dates that appear in this section. "
+            "Never invent, round or guess a number.\n")
 
     session = AgentSession(
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE),
