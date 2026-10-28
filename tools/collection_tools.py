@@ -4,6 +4,7 @@ from datetime import datetime
 from tools import policy, rules
 from tools.rules import IST
 from tools.store import CHANNELS
+from typing import Literal
 
 PERSON_STATUSES = {"customer", "third_party", "unavailable"}
 CALLBACK_REASONS = {"customer_unavailable", "customer_requested", "human_followup", "payment_help"}
@@ -12,6 +13,15 @@ OUTCOMES = {
     "dispute", "hardship", "refused", "third_party", "wrong_number", "not_available",
     "callback_requested", "human_callback", "no_resolution",
 }
+
+PersonStatus = Literal["customer", "third_party", "unavailable"]
+Channel = Literal["sms", "whatsapp"]
+AiCallbackReason = Literal["customer_unavailable", "customer_requested"]
+Outcome = Literal[
+    "paid_now", "promise_to_pay", "already_paid_confirmed", "already_paid_unconfirmed",
+    "dispute", "hardship", "refused", "third_party", "wrong_number", "not_available",
+    "callback_requested", "human_callback", "no_resolution",
+]
 
 
 class Call:

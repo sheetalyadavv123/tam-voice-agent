@@ -14,3 +14,5 @@ TTS_MODEL = os.getenv("TTS_MODEL", "eleven_flash_v2_5")
 TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "")
+COMPANY_NAME = os.getenv("COMPANY_NAME", "Tam Infosoft")
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"

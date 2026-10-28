@@ -5,23 +5,30 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal  # noqa: F401  (kept for tool signatures)
 
 # Let this file import the "tools" folder in the project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from livekit import agents
-from livekit.agents import Agent, AgentSession, RunContext, function_tool
+from livekit.agents import (
+    Agent, AgentSession, MetricsCollectedEvent, RunContext, function_tool, metrics,
+)
 from livekit.plugins import deepgram, elevenlabs, google, openai, sarvam, silero
 
 import config
 import db
-from latency import LatencyLog
-from tools import loan_tools
+from tools import rules
+from tools.collection_tools import AiCallbackReason, Call, Channel, Outcome, PersonStatus
+from tools.store import MemoryStore
 
 logger = logging.getLogger("tam-voice-agent")
-PROMPT = (Path(__file__).parent.parent / "prompts" / "system.md").read_text(encoding="utf-8")
-TRANSCRIPT_DIR = Path(__file__).parent.parent / "transcripts"
-MAX_INVALID_DATES = 3
+ROOT = Path(__file__).parent.parent
+BASE_PROMPT = (ROOT / "prompts" / "collections.md").read_text(encoding="utf-8").replace(
+    "{company}", config.COMPANY_NAME)
+TRANSCRIPT_DIR = ROOT / "transcripts"
+LOG_KEYS = ("ok", "next", "error", "reason", "status", "saved", "sent", "verified",
+            "requested", "locked", "duplicate", "source", "loan_closed")
 
 
 def build_llm():
@@ -35,114 +42,190 @@ def build_llm():
 
 def build_tts():
     if config.TTS_PROVIDER == "sarvam":
-        return sarvam.TTS(target_language_code=config.SARVAM_LANGUAGE, model="bulbul:v3",
-                          speaker=config.SARVAM_SPEAKER)
+        return sarvam.TTS(
+            target_language_code=config.SARVAM_LANGUAGE,
+            model="bulbul:v3",
+            speaker=config.SARVAM_SPEAKER,
+        )
     return elevenlabs.TTS(model=config.TTS_MODEL, voice_id=config.TTS_VOICE_ID)
 
 
-class Assistant(Agent):
-    def __init__(self, call: loan_tools.Session, call_note: str):
-        super().__init__(instructions=PROMPT + call_note)
-        self.call = call  # this call's notepad (customer, verified, attempts)
-        self.invalid_dates = 0  # impossible dates heard in a row
+def make_store():
+    # Step 10 replaces this with the Neon-backed store.
+    return MemoryStore.from_files(clock=rules.now_ist)
+
+
+def pick_target(ctx):
+    """Which customer is this call for? Job metadata wins; otherwise the test setting."""
+    meta = {}
+    try:
+        meta = json.loads(ctx.job.metadata or "{}")
+    except ValueError:
+        logger.warning("bad job metadata ignored")
+    customer_id = meta.get("customer_id") or os.getenv("TEST_CUSTOMER_ID", "C002")
+    kind = "followup" if meta.get("kind") == "followup" else "reminder"
+    return customer_id, kind
+
+
+class Collector(Agent):
+    def __init__(self, call: Call, instructions: str):
+        super().__init__(instructions=instructions)
+        self.call = call
+
+    def _run(self, name, fn, *args):
+        try:
+            result = fn(*args)
+        except Exception:
+            logger.exception("tool %s failed", name)
+            return {"error": "tool_failed", "next": "apologise_and_offer_colleague_callback"}
+        logger.info("TOOL %s -> %s", name, {k: result[k] for k in LOG_KEYS if k in result})
+        return result
+
+    @function_tool()
+    async def report_person(self, context: RunContext, status: PersonStatus) -> dict:
+        """Report who answered the phone. Call this right after asking whether you are
+        speaking with the customer.
+
+        Args:
+            status: "customer" if the person confirmed they are the customer; "third_party"
+                if someone else answered, it is a wrong number, or you are not sure;
+                "unavailable" if the customer says they cannot talk right now.
+        """
+        return self._run("report_person", self.call.report_person, status)
 
     @function_tool()
     async def verify_identity(self, context: RunContext, day: int, month: int, year: int) -> dict:
-        """Verify the caller's identity using the date of birth they said.
-        If verified, the result also includes the caller's loan details, so you
-        do not need to call get_loan_status afterwards.
+        """Check the customer's date of birth. Only use this if a tool result tells you to
+        ask for it.
 
         Args:
-            day: Day of the month, 1-31. For "second November nineteen eighty five" this is 2.
-            month: Month number, 1-12. November is 11.
-            year: The year as four digits, e.g. 1985 for "nineteen eighty five". If the
-                caller gives only two digits, ask them for the full year.
+            day: Day of the month, 1 to 31.
+            month: Month number, 1 to 12.
+            year: Full four-digit year, for example 1985. Ask again if only two digits.
         """
-        # Build the date in code: small LLMs often mis-format date strings.
-        dob = loan_tools.build_dob(day, month, year)
-        if dob is None:
-            self.invalid_dates += 1
-            logger.info("TOOL verify_identity invalid_date count=%s", self.invalid_dates)
-            if self.invalid_dates >= MAX_INVALID_DATES:
-                return {"verified": False, "error": "invalid_date",
-                        "hint": "Stop asking. Offer to transfer the caller to a human agent."}
-            return {"verified": False, "error": "invalid_date",
-                    "hint": "Ask the caller to repeat their full date of birth."}
-        self.invalid_dates = 0
-        # Filler so the caller isn't left in silence while the next LLM turn runs
-        context.session.say("एक moment, मैं check करती हूँ।", add_to_chat_ctx=False)
-        result = loan_tools.verify_identity(self.call, dob)
-        logger.info("TOOL verify_identity attempt=%s verified=%s",
-                    self.call.attempts, result.get("verified"))
-        if result.get("verified"):
-            # Return the loan details now to save a second tool round trip
-            result["loan"] = loan_tools.get_loan_status(self.call)
-        return result
+        return self._run("verify_identity", self.call.verify_identity, day, month, year)
 
     @function_tool()
-    async def get_loan_status(self, context: RunContext) -> dict:
-        """Get the verified caller's loan details. Only works after the caller
-        has been verified."""
-        result = loan_tools.get_loan_status(self.call)
-        logger.info("TOOL get_loan_status -> %s", "error" if "error" in result else "ok")
-        return result
+    async def get_due_details(self, context: RunContext) -> dict:
+        """Get the EMI amount, due date and days overdue for the customer. Only works after
+        report_person returned "give_reminder"."""
+        return self._run("get_due_details", self.call.get_due_details)
 
     @function_tool()
-    async def record_outcome(self, context: RunContext, outcome: str, note: str = "") -> dict:
-        """Record how the call ended. outcome must be one of: paid_confirmed,
-        promise_to_pay, dispute, callback_requested, wrong_person, transferred,
-        no_resolution."""
-        result = loan_tools.record_outcome(self.call, outcome, note)
-        logger.info("TOOL record_outcome(%s) -> %s", outcome, result)
-        return result
+    async def send_payment_link(self, context: RunContext, channel: Channel) -> dict:
+        """Send the customer a payment link for their EMI to their registered phone number.
+        You cannot choose the amount or the number.
+
+        Args:
+            channel: "sms" or "whatsapp", whichever the customer prefers.
+        """
+        return self._run("send_payment_link", self.call.send_payment_link, channel)
+
+    @function_tool()
+    async def check_payment_status(self, context: RunContext) -> dict:
+        """Check the payment records. Use it after sending a link, and whenever the customer
+        says they already paid. Never believe the customer's word without this."""
+        return self._run("check_payment_status", self.call.check_payment_status)
+
+    @function_tool()
+    async def record_promise_to_pay(self, context: RunContext, day: int, month: int, year: int) -> dict:
+        """Save the date on which the customer promises to pay their EMI.
+
+        Args:
+            day: Day of the month, 1 to 31.
+            month: Month number, 1 to 12.
+            year: Full four-digit year, for example 2026.
+        """
+        return self._run("record_promise_to_pay", self.call.record_promise_to_pay, day, month, year)
+
+    @function_tool()
+    async def schedule_callback(self, context: RunContext, day: int, month: int, year: int,
+                                hour: int, minute: int, reason: AiCallbackReason) -> dict:
+        """Schedule a call back to the customer at a time they ask for.
+
+        Args:
+            day: Day of the month, 1 to 31.
+            month: Month number, 1 to 12.
+            year: Full four-digit year, for example 2026.
+            hour: Hour on a 24-hour clock in Indian time, for example 16 for 4 pm.
+            minute: Minute, 0 to 59.
+            reason: "customer_unavailable" if someone else answered or the customer was away;
+                "customer_requested" if the customer asked to be called later.
+        """
+        return self._run("schedule_callback", self.call.schedule_callback,
+                         day, month, year, hour, minute, reason)
+
+    @function_tool()
+    async def record_outcome(self, context: RunContext, outcome: Outcome, note: str = "") -> dict:
+        """Record how the call ended. Call this once, just before saying goodbye.
+
+        Args:
+            outcome: The label that best matches how the call ended.
+            note: A few words of detail, never personal data.
+        """
+        return self._run("record_outcome", self.call.record_outcome, outcome, note)
 
     @function_tool()
     async def transfer_to_human(self, context: RunContext, reason: str) -> dict:
-        """Transfer the caller to a human agent. Give a short reason."""
-        result = loan_tools.transfer_to_human(self.call, reason)
-        logger.info("TOOL transfer_to_human -> %s", result)
-        return result
+        """Ask for a human colleague to call the customer back. This does not connect the
+        call to anyone.
+
+        Args:
+            reason: A short reason, for example "customer reports hardship".
+        """
+        return self._run("transfer_to_human", self.call.transfer_to_human, reason)
 
 
 async def entrypoint(ctx: agents.JobContext):
     session_id = uuid.uuid4()
     started_at = datetime.now(timezone.utc)
+    store = make_store()
+    customer_id, kind = pick_target(ctx)
 
-    # One notepad per call. The lookup happens in code, before the AI speaks.
-    call = loan_tools.Session()
-    caller_phone = os.getenv("TEST_CALLER_PHONE", "")
-    found = loan_tools.find_customer(call, caller_phone)["found"] if caller_phone else False
-    logger.info("caller lookup: found=%s", found)
+    customer = store.get_customer(customer_id)
+    if customer is None:
+        logger.error("unknown customer %s: not starting the call", customer_id)
+        return
 
-    if found:
-        call_note = ("\n\n# This call\nThe caller's number matched an account. "
-                     "Ask for their date of birth to verify them before sharing anything.")
-    else:
-        call_note = ("\n\n# This call\nThe caller's number was NOT found in our records. "
-                     "Do not share any account information. Offer to connect a human agent.")
+    # Safety gate: the same check the scheduler uses, run again before we speak.
+    attempts = [] if config.TEST_MODE else store.attempt_times(customer_id)
+    verdict = rules.can_call_now(customer, attempts, rules.now_ist())
+    window_only = config.TEST_MODE and verdict["reason"] == "outside_window"
+    if not verdict["allowed"] and not window_only:
+        logger.warning("call blocked before speaking: %s", verdict["reason"])
+        return
+    if config.TEST_MODE:
+        logger.warning("TEST_MODE is on: calling hours and attempt limits are skipped")
+
+    store.add_attempt(customer_id, rules.now_ist(), str(session_id), kind)
+    call = Call(store, customer_id, session_id=str(session_id), clock=rules.now_ist)
+
+    language = "Hindi" if call.language == "hi" else "English"
+    what = ("a follow-up to a promise the customer made earlier"
+            if kind == "followup" else "a first reminder")
+    note = (f"\n\n# This call\nCustomer first name: {call.first_name}\n"
+            f"Start in: {language}\nCall type: {what}\n")
 
     session = AgentSession(
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE),
         llm=build_llm(),
         tts=build_tts(),
         vad=silero.VAD.load(),
-        preemptive_generation=True,  # start the LLM before end-of-turn is confirmed
     )
-    latency = LatencyLog()
-    latency.attach(session)
+
+    @session.on("metrics_collected")
+    def _on_metrics(ev: MetricsCollectedEvent):
+        metrics.log_metrics(ev.metrics)
 
     async def save_transcript():
-        latency.summary()
         ended_at = datetime.now(timezone.utc)
         turns = db.extract_turns(session.history)
         if not turns:
             return
-        meta = {"customer_id": call.customer_id, "verified": call.verified,
-                "verification_attempts": call.attempts, "note": call.note}
         try:
-            await db.save_call(session_id, ctx.room.name, "console", started_at,
-                               ended_at, turns, outcome=call.outcome, metadata=meta)
-            logger.info("saved call %s (%d turns)", session_id, len(turns))
+            await db.save_call(session_id, ctx.room.name, "agent", started_at, ended_at,
+                               turns, outcome=call.outcome, metadata=call.summary())
+            logger.info("saved call %s (%d turns), outcome=%s", session_id, len(turns), call.outcome)
         except Exception:
             logger.exception("DB save failed, writing JSON fallback")
             TRANSCRIPT_DIR.mkdir(exist_ok=True)
@@ -152,11 +235,9 @@ async def entrypoint(ctx: agents.JobContext):
 
     ctx.add_shutdown_callback(save_transcript)
 
-    await session.start(room=ctx.room, agent=Assistant(call, call_note))
+    await session.start(room=ctx.room, agent=Collector(call, BASE_PROMPT + note))
     await session.generate_reply(
-        instructions="Greet the caller in Hindi in one short sentence, say you are "
-                     "Tam Infosoft's AI assistant, and ask how you can help."
-    )
+        instructions="Start the call now. Follow the Opening section of your instructions.")
 
 
 if __name__ == "__main__":
