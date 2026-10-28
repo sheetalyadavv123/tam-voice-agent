@@ -217,7 +217,8 @@ class Call:
                 self.store.set_promise_status(other["id"], "cancelled")
         self.promise_recorded = True
         return {"saved": True, "date": check["date"].isoformat(), "amount": saved["amount"],
-                "duplicate": saved["duplicate"], "next": "confirm_the_date_and_close"}
+                "duplicate": saved["duplicate"],
+                "next": "confirm_amount_and_date_then_offer_payment_link_once"}
 
     # ---- tool: schedule a callback ----
     def schedule_callback(self, day, month, year, hour, minute, reason):

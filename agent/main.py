@@ -22,6 +22,7 @@ import config
 import db
 from tools import rules
 from tools.collection_tools import AiCallbackReason, Call, Channel, Outcome, PersonStatus
+from tools.language import LanguageTracker
 from tools.store import MemoryStore
 from tools.pg_store import PostgresStore
 
@@ -82,6 +83,23 @@ class Collector(Agent):
     def __init__(self, call: Call, instructions: str):
         super().__init__(instructions=instructions)
         self.call = call
+        self.base_instructions = instructions
+        self.language = LanguageTracker(call.language)
+
+    async def on_user_turn_completed(self, turn_ctx, new_message):
+        switched = self.language.observe(new_message.text_content or "")
+        if not switched:
+            return
+        name = "English" if switched == "en" else "Hindi"
+        logger.info("customer is speaking %s, switching language", name)
+        rule = (f"# Language now\nThe customer is speaking {name}. "
+                f"Reply only in {name} from now on.")
+        # update_instructions covers later turns; turn_ctx is this reply's copy
+        await self.update_instructions(self.base_instructions + "\n" + rule + "\n")
+        turn_ctx.add_message(role="system", content=rule)
+        if isinstance(self.session.tts, sarvam.TTS):
+            self.session.tts.update_options(
+                target_language_code="en-IN" if switched == "en" else config.SARVAM_LANGUAGE)
 
     def _run(self, name, fn, *args):
         try:
