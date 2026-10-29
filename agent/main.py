@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -12,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from livekit import agents
 from livekit.agents import (
-    Agent, AgentSession, MetricsCollectedEvent, ModelSettings, RunContext, function_tool, llm,
-    metrics, room_io,
+    Agent, AgentSession, MetricsCollectedEvent, ModelSettings, RunContext, StopResponse,
+    function_tool, get_job_context, llm, metrics, room_io,
 )
 from livekit.plugins import (
     deepgram, elevenlabs, google, noise_cancellation, openai, sarvam, silero,
@@ -21,7 +22,7 @@ from livekit.plugins import (
 
 import config
 import db
-from tools import rules
+from tools import caller_words, rules
 from tools.collection_tools import AiCallbackReason, Call, Channel, Outcome, PersonStatus
 from tools.language import LanguageTracker
 from tools.speech_guard import ReplyGuard
@@ -89,7 +90,17 @@ class Collector(Agent):
         self.language = LanguageTracker(call.language)
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        switched = self.language.observe(new_message.text_content or "")
+        text = new_message.text_content or ""
+        self.call.heard(text)
+        line, hang_up = self._fixed_reply(text)
+        if line:
+            # LiveKit drops a stopped turn's message; keep it so the transcript has it
+            await self._keep_in_history(new_message)
+            handle = self.session.say(line)
+            if hang_up:
+                self._end_task = asyncio.create_task(self._end_call_after(handle))
+            raise StopResponse()
+        switched = self.language.observe(text)
         if not switched:
             return
         name = "English" if switched == "en" else "Hindi"
@@ -103,9 +114,43 @@ class Collector(Agent):
             self.session.tts.update_options(
                 target_language_code="en-IN" if switched == "en" else config.SARVAM_LANGUAGE)
 
+    def _fixed_reply(self, text):
+        """Some questions get a fixed answer from the code and the AI doesn't get the turn.
+        Returns (line, hang_up); line is None to let the AI reply."""
+        lang = self.language.current
+        if self.call.unlocked and caller_words.legal_question(text):
+            logger.warning("LEGAL HANDOFF: %s", text[:120])
+            self.call.transfer_to_human("legal question")
+            self.call.record_outcome("human_callback", "legal question")
+            return caller_words.line(caller_words.LEGAL_LINE, lang), True
+        if self.call.person_status in (None, "third_party") and caller_words.asks_why_calling(text):
+            if self.call.person_status is None:
+                if not caller_words.says_not_the_customer(text):
+                    return None, False  # maybe the customer themselves; the AI confirms who
+                self.call.report_person("third_party")
+            logger.info("THIRD PARTY LINE: %s", text[:120])
+            name = self.call.first_name
+            return caller_words.line(caller_words.THIRD_PARTY_LINE, lang, name=name), False
+        return None, False
+
+    async def _keep_in_history(self, message):
+        ctx = self.chat_ctx.copy()
+        ctx.items.append(message)
+        await self.update_chat_ctx(ctx)
+        self.session._conversation_item_added(message)  # the saved transcript reads this
+
+    async def _end_call_after(self, handle):
+        await handle.wait_for_playout()
+        self.session.shutdown()
+        try:
+            get_job_context().delete_room()  # hangs up the phone call
+        except RuntimeError:
+            pass  # no job (text tests)
+
     async def llm_node(self, chat_ctx, tools, model_settings: ModelSettings):
         # Every reply passes through ReplyGuard before it is spoken or saved.
-        guard = ReplyGuard(self.language.current, locked=not self.call.unlocked)
+        guard = ReplyGuard(self.language.current, locked=not self.call.unlocked,
+                           third_party=self.call.person_status == "third_party")
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             if isinstance(chunk, str):
                 text = guard.feed(chunk)
@@ -230,6 +275,29 @@ class Collector(Agent):
         return self._run("transfer_to_human", self.call.transfer_to_human, reason)
 
 
+def call_note(call, customer, kind, today):
+    """The "# This call" section added to the prompt: the facts for this one call."""
+    language = "Hindi" if call.language == "hi" else "English"
+    what = ("a follow-up to a promise the customer made earlier"
+            if kind == "followup" else "a first reminder")
+    loan = customer["loan"]
+    due = date.fromisoformat(loan["due_date"])
+    upcoming = ", ".join(
+        f"{d:%A} {d.day} {d:%B}"
+        for d in (today.date() + timedelta(days=i) for i in range(1, 8)))
+    return (f"\n\n# This call\nCustomer first name: {call.first_name}\n"
+            f"Today: {today:%A} {today.day} {today:%B %Y} (IST)\n"
+            f"Start in: {language}\nCall type: {what}\n"
+            f"EMI amount due: ₹{loan['emi_amount']:,}\n"
+            f"EMI was due on: {due.day} {due:%B}\n"
+            f"Next 7 days: {upcoming}\n"
+            "If the customer names a weekday, take its date from 'Next 7 days' and confirm it. "
+            "Don't ask them for the date.\n"
+            "Write every amount and date in digits exactly as shown here, like ₹2,200 and "
+            "30 October. Never write numbers as words. Never invent or round a number. "
+            "Never say the year.\n")
+
+
 async def entrypoint(ctx: agents.JobContext):
     session_id = uuid.uuid4()
     started_at = datetime.now(timezone.utc)
@@ -260,31 +328,15 @@ async def entrypoint(ctx: agents.JobContext):
 
     call = Call(store, customer_id, session_id=str(session_id), clock=rules.now_ist)
 
-    language = "Hindi" if call.language == "hi" else "English"
-    what = ("a follow-up to a promise the customer made earlier"
-            if kind == "followup" else "a first reminder")
-    today = rules.now_ist()
-    loan = customer["loan"]
-    due = date.fromisoformat(loan["due_date"])
-    upcoming = ", ".join(
-        f"{d:%A} {d.day} {d:%B}"
-        for d in (today.date() + timedelta(days=i) for i in range(1, 8)))
-    note = (f"\n\n# This call\nCustomer first name: {call.first_name}\n"
-            f"Today: {today:%A} {today.day} {today:%B %Y} (IST)\n"
-            f"Start in: {language}\nCall type: {what}\n"
-            f"EMI amount due: ₹{loan['emi_amount']:,}\n"
-            f"EMI was due on: {due.day} {due:%B %Y}\n"
-            f"Next 7 days: {upcoming}\n"
-            "If the customer names a weekday, take its date from 'Next 7 days' and confirm it. "
-            "Don't ask them for the date.\n"
-            "Write every amount and date in digits exactly as shown here, like ₹2,200 and "
-            "30 October. Never write numbers as words. Never invent or round a number.\n")
+    note = call_note(call, customer, kind, rules.now_ist())
 
     session = AgentSession(
         stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE),
         llm=build_llm(),
         tts=build_tts(),
         vad=silero.VAD.load(),
+        turn_handling={"endpointing": {"min_delay": config.ENDPOINT_MIN_DELAY,
+                                       "max_delay": config.ENDPOINT_MAX_DELAY}},
     )
 
     @session.on("metrics_collected")

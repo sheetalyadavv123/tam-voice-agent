@@ -1,7 +1,7 @@
 """The state of one collection call, and the tools the AI may use during it."""
 from datetime import datetime
 
-from tools import policy, rules
+from tools import caller_words, policy, rules
 from tools.rules import IST
 from tools.store import CHANNELS
 from typing import Literal
@@ -36,6 +36,7 @@ class Call:
         if self._customer is None:
             raise ValueError(f"unknown customer: {customer_id}")
         self.person_status = None       # customer | third_party | unavailable
+        self.was_third_party = False    # ever said they are not the customer
         self.dob_verified = False
         self.person_corrections = 0
         self.needs_dob = False
@@ -52,6 +53,12 @@ class Call:
         self.pending_checks = 0
         self.callback_id = None
         self.handoff_callback_id = None
+        self.caller_lines = []  # what the caller said, newest last
+
+    def heard(self, text):
+        """The agent passes every finished caller message here."""
+        if text and text.strip():
+            self.caller_lines.append(text.strip())
 
     # ---- facts the code (not the AI) may use ----
     @property
@@ -88,11 +95,21 @@ class Call:
             return {"ok": False, "error": "invalid_status", "allowed": sorted(PERSON_STATUSES)}
         if status == self.person_status == "customer" and self.unlocked:
             return {"ok": True, "duplicate": True, "next": "continue_the_conversation"}
-        if self.person_status == "third_party" and status == "customer":
+        # Someone who said they are not the customer stays that way: they can't become
+        # "unavailable", and becoming the customer always needs the date of birth.
+        if self.was_third_party and status == "unavailable":
+            return {"ok": False, "reason": "already_third_party",
+                    "next": "ask_when_to_reach_the_customer"}
+        if self.was_third_party and status == "customer" and self.person_status != "customer":
             if self.person_corrections >= 1:
                 return {"ok": False, "reason": "already_third_party"}
+            if not caller_words.says_is_the_customer(self.caller_lines, self.first_name):
+                return {"ok": False, "reason": "caller_did_not_say_they_are_the_customer",
+                        "next": "ask_when_to_reach_the_customer"}
             self.person_corrections += 1
             self.needs_dob = True
+        if status == "third_party":
+            self.was_third_party = True
         self.person_status = status
         if status == "customer":
             if self.unlocked:  # hand over the EMI facts now, so they can't be skipped
@@ -112,6 +129,9 @@ class Call:
             return {"verified": True}
         if self._locked():
             return self._lock()
+        if not caller_words.said_a_date(self.caller_lines):  # a guess would waste a try
+            return {"verified": False, "reason": "caller_did_not_say_a_date",
+                    "next": "ask_for_date_of_birth"}
         real = self._real_date(day, month, year)
         if real is None:
             self.impossible_dates += 1
@@ -169,16 +189,32 @@ class Call:
         loan = self._customer["loan"]
         if loan["status"] == "closed" or loan["emi_amount"] <= 0:
             return {"sent": False, "reason": "no_payment_due"}
+        # Only send when the caller named a channel; "okay" or "haan" is not enough.
+        named = caller_words.named_channel(self.caller_lines)
+        if named is None:
+            return {"sent": False, "reason": "caller_did_not_name_a_channel",
+                    "next": "ask_sms_or_whatsapp"}
         sent = self.store.links_sent_in_session(self.session_id)
         if self.links_before_promise is not None and sent > self.links_before_promise:
-            return {"sent": False, "reason": "already_sent_after_promise", "next": "close_the_call"}
+            return {**self._already_sent(), "reason": "already_sent_after_promise",
+                    "next": "say_the_link_was_already_sent_on_that_channel_and_close"}
         if sent >= policy.MAX_LINK_SENDS_PER_CALL:
-            return {"sent": False, "reason": "limit_reached", "next": "offer_promise_or_callback"}
+            return {**self._already_sent(), "reason": "limit_reached",
+                    "next": "offer_promise_or_callback"}
         link = self.store.add_payment_link(
-            self.customer_id, loan["emi_amount"], channel, self.session_id)
-        digits = "".join(ch for ch in self._customer["phone"] if ch.isdigit())
-        return {"sent": True, "channel": channel, "to_number_ending": digits[-4:],
+            self.customer_id, loan["emi_amount"], named, self.session_id)
+        return {"sent": True, "channel": named, "to_number_ending": self._number_ending(),
                 "amount": link["amount"], "next": "ask_caller_to_pay_then_tell_you"}
+
+    def _number_ending(self):
+        digits = "".join(ch for ch in self._customer["phone"] if ch.isdigit())
+        return digits[-4:]
+
+    def _already_sent(self):
+        """A refusal that says where the earlier link went, so the AI can't invent it."""
+        link = self.store.latest_link(self.customer_id)
+        return {"sent": False, "already_sent_on": link["channel"],
+                "to_number_ending": self._number_ending()}
 
     # ---- tool: did the payment arrive? (records only, never the caller's word) ----
     def check_payment_status(self):
@@ -228,7 +264,9 @@ class Call:
         self.promise_recorded = True
         if self.links_before_promise is None:
             self.links_before_promise = self.store.links_sent_in_session(self.session_id)
-        return {"saved": True, "date": check["date"].isoformat(), "amount": saved["amount"],
+        d = check["date"]
+        return {"saved": True, "date": d.isoformat(), "say_date": f"{d.day} {d:%B}",
+                "amount": saved["amount"],
                 "duplicate": saved["duplicate"],
                 "next": "confirm_amount_and_date_then_offer_payment_link_once"}
 
@@ -238,6 +276,10 @@ class Call:
             return {"error": "confirm_person_first"}
         if reason not in CALLBACK_REASONS:
             return {"saved": False, "error": "invalid_reason", "allowed": sorted(CALLBACK_REASONS)}
+        # The time must come from the caller, never from the AI.
+        if not caller_words.named_a_time(self.caller_lines):
+            return {"saved": False, "reason": "caller_did_not_give_a_time",
+                    "next": "ask_the_caller_for_a_day_and_time"}
         d = rules.make_date(day, month, year)
         try:
             due = datetime(d.year, d.month, d.day, int(hour), int(minute), tzinfo=IST) if d else None
@@ -273,6 +315,8 @@ class Call:
                   else "promise_to_pay" if self.promise_recorded else None)
         if better and outcome in WEAKER_OUTCOMES:
             return {"saved": False, "error": "records_show_" + better, "use": better}
+        if self.person_status == "third_party" and outcome in ("not_available", "callback_requested"):
+            return {"saved": False, "error": "someone_else_answered", "use": "third_party"}
         self.outcome = outcome
         self.note = (note or "")[:200]
         return {"saved": True}
@@ -303,6 +347,9 @@ class Call:
 
     # ---- tool: ask for a human (a callback until real transfers exist) ----
     def transfer_to_human(self, reason):
+        if self.person_status == "third_party":  # a colleague calls the customer, not them
+            return {"requested": False, "reason": "not_the_customer",
+                    "next": "say_we_will_try_the_customer_again_later"}
         self.handoff_requested = True
         if self.handoff_callback_id is None:
             due = rules.next_window_start(self.clock())

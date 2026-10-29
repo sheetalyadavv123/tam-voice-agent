@@ -1,7 +1,8 @@
 import pytest
 
 from tools.speech_guard import (
-    FALLBACK, LOCKED_FALLBACK, MAX_SENTENCES, ReplyGuard, clean_sentence, words_to_digits,
+    FALLBACK, LOCKED_FALLBACK, MAX_SENTENCES, ReplyGuard, clean_sentence, drop_this_years,
+    words_to_digits,
 )
 
 
@@ -56,8 +57,8 @@ def test_unsafe_sentences_dropped(text, why):
 
 
 def test_clean_sentence_untouched():
-    assert clean_sentence("क्या आप 30 अक्टूबर तक भुगतान कर पाएंगे?") == (
-        "क्या आप 30 अक्टूबर तक भुगतान कर पाएंगे?", None)
+    assert clean_sentence("क्या आप 30 अक्टूबर तक pay कर पाएंगे?") == (
+        "क्या आप 30 अक्टूबर तक pay कर पाएंगे?", None)
 
 
 def stream(guard, pieces):
@@ -170,3 +171,41 @@ def test_amounts_with_rupees_word_get_symbol(text, expected):
 
 def test_money_words_dropped_for_third_party():
     assert clean_sentence("मैं अभी बाकी का पैसा बताने में सक्षम नहीं हूँ।", locked=True)[0] == ""
+
+
+# ---- step 8: simpler words on a phone line ----
+
+@pytest.mark.parametrize("text, expected", [
+    ("आपकी EMI 10 September को देय थी।", "आपकी EMI 10 September को due थी।"),
+    ("आप कब तक भर पाएँगी?", "आप कब तक pay कर पाएँगी?"),
+    ("क्या आप भुगतान कर पाएंगी?", "क्या आप pay कर पाएंगी?"),
+])
+def test_simpler_words(text, expected):
+    assert clean_sentence(text)[0] == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("₹2,200 30 October 2026 को", "₹2,200 30 October को"),
+    ("due on 10 September, 2026.", "due on 10 September."),
+    ("30 अक्टूबर 2026 तक", "30 अक्टूबर तक"),
+    ("10-09-2026 को", "10 September को"),
+    ("5 January 2027", "5 January"),
+    ("born on 2 November 1985", "born on 2 November 1985"),   # a birth year stays
+    ("02-11-1985", "02-11-1985"),
+])
+def test_dates_lose_this_years_year(text, expected):
+    assert drop_this_years(text, this_year=2026) == expected
+
+
+# ---- step 4b: a third party never hears about a colleague ----
+
+def test_third_party_hears_try_again_not_colleague():
+    g = ReplyGuard("hi", locked=True, third_party=True)
+    out = stream(g, ["माफ़ कीजिए। हमारी एक सहयोगी उन्हें वापस कॉल करेंगी। हमारी टीम भी संपर्क करेगी।"])
+    assert out.strip() == "माफ़ कीजिए। " + LOCKED_FALLBACK["hi"]
+    assert [e[0] for e in g.events] == ["colleague_for_third_party"] * 2
+
+
+def test_customer_can_still_hear_about_a_colleague():
+    g = ReplyGuard("en")
+    assert stream(g, ["A colleague will call you back."]).strip() == "A colleague will call you back."

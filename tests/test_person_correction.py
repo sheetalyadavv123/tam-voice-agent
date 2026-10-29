@@ -11,12 +11,14 @@ def make_call():
 def test_third_party_can_be_corrected_once():
     c = make_call()
     c.report_person("third_party")
+    c.heard("sorry, main hi bol rahi hoon")
     assert c.report_person("customer")["ok"] is True
 
 
 def test_only_one_correction_is_allowed():
     c = make_call()
     c.report_person("third_party")
+    c.heard("main hi Sunita hoon")
     c.report_person("customer")
     c.report_person("third_party")
     assert c.report_person("customer")["reason"] == "already_third_party"
@@ -25,5 +27,6 @@ def test_only_one_correction_is_allowed():
 def test_correction_requires_date_of_birth():
     c = make_call()
     c.report_person("third_party")
+    c.heard("Sunita speaking")
     assert c.report_person("customer")["next"] == "ask_date_of_birth"
     assert c.get_due_details() == {"error": "not_unlocked"}

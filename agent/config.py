@@ -17,3 +17,7 @@ LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "")
 COMPANY_NAME = os.getenv("COMPANY_NAME", "Tam Infosoft")
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 APP_ENV = os.getenv("APP_ENV", "")
+# Seconds of silence before the agent replies. LiveKit's defaults are 0.5 and 3.0; the
+# 3 s ceiling made short answers like "हाँ" wait about 2.5 s.
+ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINT_MIN_DELAY", "0.4"))
+ENDPOINT_MAX_DELAY = float(os.getenv("ENDPOINT_MAX_DELAY", "1.5"))
