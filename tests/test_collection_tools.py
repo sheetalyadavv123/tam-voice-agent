@@ -75,7 +75,7 @@ def test_dob_mode_requires_dob(store, monkeypatch):
     assert c.report_person("customer")["next"] == "ask_date_of_birth"
     assert c.get_due_details() == {"error": "not_unlocked"}
     assert c.verify_identity(1, 1, 2000) == {"verified": False, "attempts_left": 2}
-    assert c.verify_identity(2, 11, 1985) == {"verified": True}
+    assert c.verify_identity(2, 11, 1985)["verified"] is True
     assert c.get_due_details()["emi_amount"] == 2200
 
 
@@ -128,3 +128,95 @@ def test_open_promise_shown(store):
     c = make_call(store, "C011")
     c.report_person("customer")
     assert c.get_due_details()["open_promise"] == {"date": "2026-10-27", "amount": 5400}
+
+# ---- rules moved from the prompt into code ----
+
+def test_reminder_facts_come_with_report_person(store):
+    c = make_call(store, "C002")
+    r = c.report_person("customer")
+    assert r["next"] == "give_reminder"
+    assert r["due"]["emi_amount"] == 2200 and r["due"]["due_date"] == "2026-09-10"
+
+
+def test_reminder_facts_come_with_verified_dob(store, monkeypatch):
+    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+    c = make_call(store, "C002")
+    assert "due" not in c.report_person("customer")
+    r = c.verify_identity(2, 11, 1985)
+    assert r["verified"] is True and r["due"]["emi_amount"] == 2200
+
+
+def test_repeated_customer_report_is_harmless(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    r = c.report_person("customer")
+    assert r == {"ok": True, "duplicate": True, "next": "continue_the_conversation"}
+    assert c.unlocked
+
+
+def test_repeated_customer_report_still_asks_dob_when_needed(store, monkeypatch):
+    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    assert c.report_person("customer")["next"] == "ask_date_of_birth"
+
+
+def test_only_one_link_after_a_promise(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    assert c.record_promise_to_pay(30, 10, 2026)["saved"] is True
+    assert c.send_payment_link("sms")["sent"] is True
+    r = c.send_payment_link("whatsapp")
+    assert r == {"sent": False, "reason": "already_sent_after_promise", "next": "close_the_call"}
+
+
+def test_link_before_promise_still_allows_one_after(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    assert c.send_payment_link("sms")["sent"] is True
+    c.record_promise_to_pay(30, 10, 2026)
+    assert c.send_payment_link("whatsapp")["sent"] is True
+    assert c.send_payment_link("sms")["sent"] is False
+
+
+@pytest.mark.parametrize("setup, expected", [
+    (lambda c: None, "no_resolution"),
+    (lambda c: c.report_person("third_party"), "third_party"),
+    (lambda c: c.report_person("unavailable"), "not_available"),
+    (lambda c: (c.report_person("customer"), c.record_promise_to_pay(30, 10, 2026)), "promise_to_pay"),
+    (lambda c: (c.report_person("customer"), c.transfer_to_human("hardship")), "human_callback"),
+    (lambda c: (c.report_person("customer"),
+                c.schedule_callback(29, 10, 2026, 16, 0, "customer_requested")), "callback_requested"),
+])
+def test_missing_outcome_filled_in_from_records(store, setup, expected):
+    c = make_call(store, "C002")
+    setup(c)
+    if expected == "human_callback":
+        c.outcome = None  # pretend transfer_to_human had not set it
+    assert c.finalize_outcome() is True
+    assert c.outcome == expected and "filled in by code" in c.note
+
+
+def test_recorded_outcome_is_kept(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    c.record_outcome("refused")
+    assert c.finalize_outcome() is False and c.outcome == "refused"
+
+
+def test_records_win_over_a_weaker_outcome(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    c.record_promise_to_pay(30, 10, 2026)
+    r = c.record_outcome("no_resolution")
+    assert r == {"saved": False, "error": "records_show_promise_to_pay", "use": "promise_to_pay"}
+    assert c.record_outcome("promise_to_pay")["saved"] is True
+    assert c.record_outcome("human_callback")["saved"] is True  # a real handover is still allowed
+
+
+def test_paid_now_without_link_points_to_already_paid(store):
+    c = make_call(store, "C003")
+    c.report_person("customer")
+    assert c.check_payment_status()["status"] == "paid"
+    assert c.record_outcome("paid_now")["use"] == "already_paid_confirmed"
+    assert c.finalize_outcome() is True and c.outcome == "already_paid_confirmed"

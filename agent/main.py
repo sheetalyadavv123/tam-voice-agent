@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from livekit import agents
 from livekit.agents import (
-    Agent, AgentSession, MetricsCollectedEvent, RunContext, function_tool, metrics, room_io,
+    Agent, AgentSession, MetricsCollectedEvent, ModelSettings, RunContext, function_tool, llm,
+    metrics, room_io,
 )
 from livekit.plugins import (
     deepgram, elevenlabs, google, noise_cancellation, openai, sarvam, silero,
@@ -23,6 +24,7 @@ import db
 from tools import rules
 from tools.collection_tools import AiCallbackReason, Call, Channel, Outcome, PersonStatus
 from tools.language import LanguageTracker
+from tools.speech_guard import ReplyGuard
 from tools.store import MemoryStore
 from tools.pg_store import PostgresStore
 
@@ -101,6 +103,27 @@ class Collector(Agent):
             self.session.tts.update_options(
                 target_language_code="en-IN" if switched == "en" else config.SARVAM_LANGUAGE)
 
+    async def llm_node(self, chat_ctx, tools, model_settings: ModelSettings):
+        # Every reply passes through ReplyGuard before it is spoken or saved.
+        guard = ReplyGuard(self.language.current, locked=not self.call.unlocked)
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            if isinstance(chunk, str):
+                text = guard.feed(chunk)
+                if text:
+                    yield text
+                continue
+            if isinstance(chunk, llm.ChatChunk) and chunk.delta and chunk.delta.content:
+                text = guard.feed(chunk.delta.content)
+                chunk.delta.content = None  # tool calls and usage still go through
+                if text:
+                    yield text
+            yield chunk
+        rest = guard.finish()
+        if rest:
+            yield rest
+        for why, sentence in guard.events:
+            logger.warning("SPEECH GUARD %s: %s", why, sentence[:120])
+
     def _run(self, name, fn, *args):
         try:
             result = fn(*args)
@@ -113,7 +136,8 @@ class Collector(Agent):
     @function_tool()
     async def report_person(self, context: RunContext, status: PersonStatus) -> dict:
         """Report who answered the phone. Call this right after asking whether you are
-        speaking with the customer.
+        speaking with the customer. When it returns "give_reminder", the EMI facts are
+        under "due".
 
         Args:
             status: "customer" if the person confirmed they are the customer; "third_party"
@@ -137,8 +161,8 @@ class Collector(Agent):
 
     @function_tool()
     async def get_due_details(self, context: RunContext) -> dict:
-        """Get the EMI amount, due date and days overdue for the customer. Only works after
-        report_person returned "give_reminder"."""
+        """Get the EMI amount and due date again. report_person already returns them under
+        "due", so only use this if you need them a second time."""
         return self._run("get_due_details", self.call.get_due_details)
 
     @function_tool()
@@ -269,6 +293,8 @@ async def entrypoint(ctx: agents.JobContext):
 
     async def finish():
         ended_at = datetime.now(timezone.utc)
+        if call.finalize_outcome():
+            logger.warning("no outcome was recorded, code set %s", call.outcome)
         store.set_attempt_outcome(str(session_id), call.outcome)
         if persistent:
             try:

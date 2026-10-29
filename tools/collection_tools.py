@@ -14,6 +14,8 @@ OUTCOMES = {
     "callback_requested", "human_callback", "no_resolution",
 }
 
+WEAKER_OUTCOMES = {"no_resolution", "refused", "callback_requested", "not_available"}
+
 PersonStatus = Literal["customer", "third_party", "unavailable"]
 Channel = Literal["sms", "whatsapp"]
 AiCallbackReason = Literal["customer_unavailable", "customer_requested"]
@@ -46,6 +48,7 @@ class Call:
         self.payment_confirmed = False
         self.prior_payment_seen = False
         self.promise_recorded = False
+        self.links_before_promise = None  # after a promise, only one more link may go out
         self.pending_checks = 0
         self.callback_id = None
         self.handoff_callback_id = None
@@ -83,6 +86,8 @@ class Call:
     def report_person(self, status):
         if status not in PERSON_STATUSES:
             return {"ok": False, "error": "invalid_status", "allowed": sorted(PERSON_STATUSES)}
+        if status == self.person_status == "customer" and self.unlocked:
+            return {"ok": True, "duplicate": True, "next": "continue_the_conversation"}
         if self.person_status == "third_party" and status == "customer":
             if self.person_corrections >= 1:
                 return {"ok": False, "reason": "already_third_party"}
@@ -90,7 +95,9 @@ class Call:
             self.needs_dob = True
         self.person_status = status
         if status == "customer":
-            return {"ok": True, "next": "give_reminder" if self.unlocked else "ask_date_of_birth"}
+            if self.unlocked:  # hand over the EMI facts now, so they can't be skipped
+                return {"ok": True, "next": "give_reminder", "due": self.get_due_details()}
+            return {"ok": True, "next": "ask_date_of_birth"}
         if status == "third_party":
             return {"ok": True, "next": "share_nothing_and_end_politely"}
         return {"ok": True, "next": "ask_when_to_call_back"}
@@ -114,7 +121,7 @@ class Call:
         self.dob_attempts += 1
         if real.isoformat() == self._customer["dob"]:
             self.dob_verified = True
-            return {"verified": True}
+            return {"verified": True, "next": "give_reminder", "due": self.get_due_details()}
         if self._locked():
             return self._lock()
         return {"verified": False, "attempts_left": policy.MAX_DOB_ATTEMPTS - self.dob_attempts}
@@ -162,7 +169,10 @@ class Call:
         loan = self._customer["loan"]
         if loan["status"] == "closed" or loan["emi_amount"] <= 0:
             return {"sent": False, "reason": "no_payment_due"}
-        if self.store.links_sent_in_session(self.session_id) >= policy.MAX_LINK_SENDS_PER_CALL:
+        sent = self.store.links_sent_in_session(self.session_id)
+        if self.links_before_promise is not None and sent > self.links_before_promise:
+            return {"sent": False, "reason": "already_sent_after_promise", "next": "close_the_call"}
+        if sent >= policy.MAX_LINK_SENDS_PER_CALL:
             return {"sent": False, "reason": "limit_reached", "next": "offer_promise_or_callback"}
         link = self.store.add_payment_link(
             self.customer_id, loan["emi_amount"], channel, self.session_id)
@@ -216,6 +226,8 @@ class Call:
             if other["id"] != saved["id"]:
                 self.store.set_promise_status(other["id"], "cancelled")
         self.promise_recorded = True
+        if self.links_before_promise is None:
+            self.links_before_promise = self.store.links_sent_in_session(self.session_id)
         return {"saved": True, "date": check["date"].isoformat(), "amount": saved["amount"],
                 "duplicate": saved["duplicate"],
                 "next": "confirm_amount_and_date_then_offer_payment_link_once"}
@@ -252,10 +264,42 @@ class Call:
             "already_paid_confirmed": self.prior_payment_seen,
         }
         if outcome in needs_proof and not needs_proof[outcome]:
-            return {"saved": False, "error": "not_supported_by_records", "outcome": outcome}
+            refused = {"saved": False, "error": "not_supported_by_records", "outcome": outcome}
+            if outcome == "paid_now" and self.prior_payment_seen:
+                refused["use"] = "already_paid_confirmed"
+            return refused
+        # the records win: a paid or promised call can't be logged as a lesser outcome
+        better = ("paid_now" if self.payment_confirmed
+                  else "promise_to_pay" if self.promise_recorded else None)
+        if better and outcome in WEAKER_OUTCOMES:
+            return {"saved": False, "error": "records_show_" + better, "use": better}
         self.outcome = outcome
         self.note = (note or "")[:200]
         return {"saved": True}
+
+    def finalize_outcome(self):
+        """Run when the call ends. If the AI never recorded an outcome, pick one from
+        what the records show. Returns True if it had to fill one in."""
+        if self.outcome is not None:
+            return False
+        if self.payment_confirmed:
+            self.outcome = "paid_now"
+        elif self.promise_recorded:
+            self.outcome = "promise_to_pay"
+        elif self.handoff_requested:
+            self.outcome = "human_callback"
+        elif self.prior_payment_seen:
+            self.outcome = "already_paid_confirmed"
+        elif self.person_status == "third_party":
+            self.outcome = "third_party"
+        elif self.person_status == "unavailable":
+            self.outcome = "not_available"
+        elif self.callback_id is not None:
+            self.outcome = "callback_requested"
+        else:
+            self.outcome = "no_resolution"
+        self.note = (self.note + " [outcome filled in by code]").strip()[:200]
+        return True
 
     # ---- tool: ask for a human (a callback until real transfers exist) ----
     def transfer_to_human(self, reason):
