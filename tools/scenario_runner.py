@@ -66,6 +66,10 @@ def run_scenario(sc, now=NOW):
                 _world(store, sc["customer"], step)
                 log.append(f"   {number}. (world) {step['world']}")
                 continue
+            if "hear" in step:
+                call.heard(step["hear"])
+                log.append(f"   {number}. (caller) {step['hear']}")
+                continue
             tool = step["call"]
             if tool not in TOOLS:
                 failures.append(f"{sc['name']} step {number}: unknown tool '{tool}'")

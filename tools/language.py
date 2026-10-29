@@ -7,13 +7,21 @@ import re
 
 DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 LATIN = re.compile(r"[A-Za-z]")
+# Hindi written in Roman letters ("WhatsApp pe bhej do"). Only words that are not
+# also English, so "main", "do" and "to" are left out.
+HINGLISH = re.compile(
+    r"\b(?:hai|hain|kya|kyun|kyon|nahi|nahin|haan|ji|bhej|bhejo|karo|kariye|kijiye|dijiye"
+    r"|hoon|hun|theek|thik|accha|achha|acha|baje|shaam|subah|hoga|hogi|bata|batao|mera"
+    r"|meri|mujhe|aap|aapka|aapki|pe|kal|aaj|bhi|wala|wali|abhi|paisa|paise|dunga|dungi"
+    r"|karungi|karunga|kaam|baat)\b",
+    re.I)
 SWITCH_AFTER = 2  # replies in a row in the other language
 
 
 def turn_language(text: str) -> str | None:
-    """"hi" if the turn has any Devanagari, "en" if it is only Roman letters,
-    None if there is nothing to judge (empty, digits, another script)."""
-    if DEVANAGARI.search(text):
+    """"hi" if the turn has any Devanagari or Hindi words in Roman letters, "en" if it
+    is only English, None if there is nothing to judge (empty, digits, another script)."""
+    if DEVANAGARI.search(text) or HINGLISH.search(text):
         return "hi"
     if LATIN.search(text):
         return "en"

@@ -47,6 +47,7 @@ def test_third_party_gets_nothing(store):
     c = make_call(store)
     assert c.report_person("third_party")["next"] == "share_nothing_and_end_politely"
     assert c.get_due_details() == {"error": "not_unlocked"}
+    c.heard("actually main hi Sunita hoon")
     assert c.report_person("customer")["next"] == "ask_date_of_birth"
     assert c.get_due_details() == {"error": "not_unlocked"}
 
@@ -73,6 +74,7 @@ def test_dob_mode_requires_dob(store, monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     c = make_call(store, "C002")
     assert c.report_person("customer")["next"] == "ask_date_of_birth"
+    c.heard("2 November 1985")
     assert c.get_due_details() == {"error": "not_unlocked"}
     assert c.verify_identity(1, 1, 2000) == {"verified": False, "attempts_left": 2}
     assert c.verify_identity(2, 11, 1985)["verified"] is True
@@ -83,6 +85,7 @@ def test_dob_lockout(store, monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     c = make_call(store, "C002")
     c.report_person("customer")
+    c.heard("2 November 1985")
     c.verify_identity(1, 1, 2000)
     c.verify_identity(2, 2, 2000)
     assert c.verify_identity(3, 3, 2000)["locked"] is True
@@ -95,6 +98,7 @@ def test_impossible_dates_do_not_use_attempts(store, monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     c = make_call(store, "C002")
     c.report_person("customer")
+    c.heard("2 November 1985")
     assert c.verify_identity(31, 2, 1990)["error"] == "impossible_date"
     assert c.verify_identity(31, 2, 1990)["error"] == "impossible_date"
     assert c.verify_identity(1, 1, 2000) == {"verified": False, "attempts_left": 2}
@@ -104,6 +108,7 @@ def test_impossible_dates_cap_hands_over(store, monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     c = make_call(store, "C002")
     c.report_person("customer")
+    c.heard("2 November 1985")
     c.verify_identity(31, 2, 1990)
     c.verify_identity(31, 2, 1990)
     assert c.verify_identity(31, 2, 1990)["locked"] is True
@@ -114,6 +119,7 @@ def test_two_digit_year_rejected(store, monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     c = make_call(store, "C002")
     c.report_person("customer")
+    c.heard("2 November 1985")
     assert c.verify_identity(2, 11, 85)["error"] == "impossible_date"
 
 
@@ -142,6 +148,8 @@ def test_reminder_facts_come_with_verified_dob(store, monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     c = make_call(store, "C002")
     assert "due" not in c.report_person("customer")
+    c.heard("2 November 1985")
+    c.heard("2 November 1985")
     r = c.verify_identity(2, 11, 1985)
     assert r["verified"] is True and r["due"]["emi_amount"] == 2200
 
@@ -165,16 +173,22 @@ def test_only_one_link_after_a_promise(store):
     c = make_call(store, "C002")
     c.report_person("customer")
     assert c.record_promise_to_pay(30, 10, 2026)["saved"] is True
+    c.heard("SMS pe bhej do")
     assert c.send_payment_link("sms")["sent"] is True
+    c.heard("WhatsApp pe bhi bhejo")
     r = c.send_payment_link("whatsapp")
-    assert r == {"sent": False, "reason": "already_sent_after_promise", "next": "close_the_call"}
+    assert r == {"sent": False, "already_sent_on": "sms", "to_number_ending": "0002",
+                 "reason": "already_sent_after_promise",
+                 "next": "say_the_link_was_already_sent_on_that_channel_and_close"}
 
 
 def test_link_before_promise_still_allows_one_after(store):
     c = make_call(store, "C002")
     c.report_person("customer")
+    c.heard("SMS kar dijiye")
     assert c.send_payment_link("sms")["sent"] is True
     c.record_promise_to_pay(30, 10, 2026)
+    c.heard("WhatsApp pe bhi")
     assert c.send_payment_link("whatsapp")["sent"] is True
     assert c.send_payment_link("sms")["sent"] is False
 
@@ -185,7 +199,7 @@ def test_link_before_promise_still_allows_one_after(store):
     (lambda c: c.report_person("unavailable"), "not_available"),
     (lambda c: (c.report_person("customer"), c.record_promise_to_pay(30, 10, 2026)), "promise_to_pay"),
     (lambda c: (c.report_person("customer"), c.transfer_to_human("hardship")), "human_callback"),
-    (lambda c: (c.report_person("customer"),
+    (lambda c: (c.report_person("customer"), c.heard("kal 4 baje"),
                 c.schedule_callback(29, 10, 2026, 16, 0, "customer_requested")), "callback_requested"),
 ])
 def test_missing_outcome_filled_in_from_records(store, setup, expected):
@@ -220,3 +234,123 @@ def test_paid_now_without_link_points_to_already_paid(store):
     assert c.check_payment_status()["status"] == "paid"
     assert c.record_outcome("paid_now")["use"] == "already_paid_confirmed"
     assert c.finalize_outcome() is True and c.outcome == "already_paid_confirmed"
+
+
+# ---- step 2: no actions nobody asked for ----
+
+@pytest.mark.parametrize("said", ["okay", "haan", "हां भेज दो"])
+def test_link_refused_without_a_named_channel(store, said):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    c.heard(said)
+    assert c.send_payment_link("sms") == {
+        "sent": False, "reason": "caller_did_not_name_a_channel", "next": "ask_sms_or_whatsapp"}
+    assert store.links_sent_in_session("s1") == 0
+
+
+def test_link_goes_on_the_channel_the_caller_named(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    c.heard("WhatsApp pe bhej do")
+    r = c.send_payment_link("sms")  # the AI picked the wrong one; the caller's word wins
+    assert r["sent"] is True and r["channel"] == "whatsapp"
+    assert store.latest_link("C002")["channel"] == "whatsapp"
+
+
+@pytest.mark.parametrize("said", ["okay", "haan", "मेरी बहन हैं"])
+def test_callback_refused_without_a_time_from_the_caller(store, said):
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    c.heard(said)
+    r = c.schedule_callback(29, 10, 2026, 18, 0, "customer_unavailable")
+    assert r == {"saved": False, "reason": "caller_did_not_give_a_time",
+                 "next": "ask_the_caller_for_a_day_and_time"}
+    assert c.callback_id is None
+
+
+def test_callback_scheduled_when_the_caller_gives_a_time(store):
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    c.heard("kal shaam 6 baje")
+    r = c.schedule_callback(29, 10, 2026, 18, 0, "customer_unavailable")
+    assert r["saved"] is True and r["when"].startswith("2026-10-29T18:00")
+
+
+# ---- step 4b: no colleague for a third party ----
+
+def test_no_colleague_handover_for_a_third_party(store):
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    assert c.transfer_to_human("wants the amount") == {
+        "requested": False, "reason": "not_the_customer",
+        "next": "say_we_will_try_the_customer_again_later"}
+    assert c.handoff_requested is False and c.handoff_callback_id is None
+
+
+# ---- step 8: the date to say has no year ----
+
+def test_promise_gives_a_date_without_the_year(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    assert c.record_promise_to_pay(30, 10, 2026)["say_date"] == "30 October"
+
+
+# ---- a third party can't slip past the date-of-birth check ----
+
+def test_third_party_cannot_become_unavailable(store):
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    assert c.report_person("unavailable") == {
+        "ok": False, "reason": "already_third_party", "next": "ask_when_to_reach_the_customer"}
+    assert c.person_status == "third_party"
+
+
+def test_third_party_then_customer_always_needs_dob(store):
+    # the gap found in the sister test: third_party -> unavailable -> customer skipped the DOB
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    c.report_person("unavailable")
+    c.heard("actually main hi Sunita hoon")
+    r = c.report_person("customer")
+    assert r == {"ok": True, "next": "ask_date_of_birth"}
+    assert c.get_due_details() == {"error": "not_unlocked"}
+    c.heard("15 March 1990")
+    assert c.verify_identity(15, 3, 1990) == {"verified": False, "attempts_left": 2}
+    assert c.get_due_details() == {"error": "not_unlocked"}
+
+
+def test_customer_who_steps_away_is_still_unlocked_on_return(store):
+    c = make_call(store, "C002")
+    c.report_person("unavailable")
+    assert c.report_person("customer")["next"] == "give_reminder"
+
+
+def test_okay_from_a_third_party_does_not_make_them_the_customer(store):
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    c.heard("okay")
+    assert c.report_person("customer") == {
+        "ok": False, "reason": "caller_did_not_say_they_are_the_customer",
+        "next": "ask_when_to_reach_the_customer"}
+    assert c.person_status == "third_party" and c.person_corrections == 0
+
+
+def test_invented_date_of_birth_is_not_checked(store):
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    c.heard("actually main hi Sunita hoon")
+    c.report_person("customer")
+    r = c.verify_identity(1, 1, 2000)  # the caller hasn't said a date yet
+    assert r == {"verified": False, "reason": "caller_did_not_say_a_date",
+                 "next": "ask_for_date_of_birth"}
+    assert c.dob_attempts == 0
+    c.heard("15 March 1990")
+    assert c.verify_identity(15, 3, 1990) == {"verified": False, "attempts_left": 2}
+
+
+def test_third_party_call_is_logged_as_third_party(store):
+    c = make_call(store, "C002")
+    c.report_person("third_party")
+    assert c.record_outcome("not_available") == {
+        "saved": False, "error": "someone_else_answered", "use": "third_party"}
+    assert c.record_outcome("third_party")["saved"] is True

@@ -37,3 +37,18 @@ def test_streak_resets_on_same_language():
     t.observe("हां")
     assert t.observe("Friday.") is None
     assert t.current == "hi"
+
+
+def test_hinglish_in_roman_letters_counts_as_hindi():
+    assert turn_language("WhatsApp pe bhej do") == "hi"
+    assert turn_language("case hoga kya?") == "hi"
+    assert turn_language("kal shaam 6 baje") == "hi"
+    assert turn_language("I'll pay on Friday, main reason is salary") == "en"
+
+
+def test_hinglish_does_not_switch_a_hindi_call_to_english():
+    t = LanguageTracker("hi")
+    assert t.observe("Okay") is None
+    assert t.observe("WhatsApp pe bhej do") is None
+    assert t.observe("case hoga kya?") is None
+    assert t.current == "hi"

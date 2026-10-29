@@ -25,9 +25,10 @@ def make_call(store, cid="C002"):
     return Call(store, cid, session_id="s1", clock=lambda: NOW)
 
 
-def unlocked_call(store, cid="C002"):
+def unlocked_call(store, cid="C002", says="SMS pe bhej dijiye"):
     c = make_call(store, cid)
     c.report_person("customer")
+    c.heard(says)
     return c
 
 
@@ -50,9 +51,11 @@ def test_link_invalid_channel(store):
 def test_link_limit_per_call(store):
     c = unlocked_call(store)
     assert c.send_payment_link("sms")["sent"] is True
+    c.heard("WhatsApp pe bhi bhej do")
     assert c.send_payment_link("whatsapp")["sent"] is True
-    assert c.send_payment_link("sms") == {"sent": False, "reason": "limit_reached",
-                                          "next": "offer_promise_or_callback"}
+    assert c.send_payment_link("sms") == {
+        "sent": False, "already_sent_on": "whatsapp", "to_number_ending": "0002",
+        "reason": "limit_reached", "next": "offer_promise_or_callback"}
 
 
 def test_link_not_sent_for_closed_loan(store):
@@ -138,6 +141,7 @@ def test_promise_needs_unlock(store):
 def test_callback_saved_and_replaced(store):
     c = make_call(store, "C006")
     c.report_person("third_party")
+    c.heard("kal subah 10 baje kar lena, nahi to shaam 4 baje")
     first = c.schedule_callback(29, 10, 2026, 10, 0, "customer_unavailable")
     assert first["saved"] is True and first["when"].startswith("2026-10-29T10:00")
     assert c.schedule_callback(29, 10, 2026, 16, 0, "customer_unavailable")["saved"] is True
@@ -150,6 +154,7 @@ def test_callback_rules(store):
         29, 10, 2026, 10, 0, "customer_unavailable") == {"error": "confirm_person_first"}
     c = make_call(store)
     c.report_person("unavailable")
+    c.heard("raat 9 baje call karna")
     assert c.schedule_callback(29, 10, 2026, 21, 0, "customer_unavailable")["reason"] == "outside_window"
     assert c.schedule_callback(28, 10, 2026, 9, 0, "customer_unavailable")["reason"] == "in_the_past"
     assert c.schedule_callback(10, 11, 2026, 10, 0, "customer_unavailable")["reason"] == "too_far"

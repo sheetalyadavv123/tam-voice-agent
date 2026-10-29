@@ -3,6 +3,7 @@
   steps:
     - {call: report_person, args: {status: customer}, expect: {ok: true, next: give_reminder}}
     - {call: get_due_details, expect: {emi_amount: 2200, overdue_days: 44}, expect_absent: [outstanding, dob]}
+    - {hear: "SMS pe bhej dijiye"}
     - {call: send_payment_link, args: {channel: sms}, expect: {sent: true, amount: 2200, to_number_ending: "0002"}, expect_absent: [url]}
     - {call: check_payment_status, expect: {status: pending}}
     - {world: pay_link}
@@ -52,6 +53,7 @@
     - {call: get_due_details, expect: {error: not_unlocked}}
     - {call: send_payment_link, args: {channel: sms}, expect: {error: not_unlocked}}
     - {call: record_promise_to_pay, args: {day: 30, month: 10, year: 2026}, expect: {error: not_unlocked}}
+    - {hear: "actually main hi hoon"}
     - {call: report_person, args: {status: customer}, expect: {"ok": true, "next": "ask_date_of_birth"}}
     - {call: get_due_details, expect: {error: not_unlocked}}
     - {call: record_outcome, args: {outcome: third_party}, expect: {saved: true}}
@@ -63,6 +65,7 @@
   customer: C001
   steps:
     - {call: report_person, args: {status: unavailable}, expect: {ok: true, next: ask_when_to_call_back}}
+    - {hear: "kal subah 10 baje call kar lijiye"}
     - {call: schedule_callback, args: {day: 29, month: 10, year: 2026, hour: 10, minute: 0, reason: customer_unavailable}, expect: {saved: true}}
     - {call: record_outcome, args: {outcome: not_available}, expect: {saved: true}}
   final:
@@ -119,6 +122,7 @@
   steps:
     - {call: report_person, args: {status: customer}, expect: {ok: true, next: ask_date_of_birth}}
     - {call: get_due_details, expect: {error: not_unlocked}}
+    - {hear: "31 February 1990"}
     - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {error: impossible_date}}
     - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {error: impossible_date}}
     - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {locked: true}}

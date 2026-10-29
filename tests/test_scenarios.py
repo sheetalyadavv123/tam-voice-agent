@@ -60,6 +60,7 @@ def test_promise_then_followup_paid():
     follow = Call(store, "C002", session_id="f1", clock=clock)
     follow.report_person("customer")
     assert follow.get_due_details()["open_promise"] == {"date": "2026-10-28", "amount": 2200}
+    follow.heard("SMS bhej do")
     follow.send_payment_link("sms")
     simulator.pay_link(store, "C002")
     assert follow.check_payment_status()["status"] == "paid"

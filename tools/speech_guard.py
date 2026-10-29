@@ -13,9 +13,14 @@ runs each reply through clean_sentence before it reaches the voice.
 - Amounts and dates written as words become digits, like "दो हज़ार दो सौ" -> "2,200".
   Only numbers next to hundred/thousand/lakh, a month or "rupees" are changed, so
   "एक बार" and "one moment" stay as they are.
+- Words that are hard to catch on a phone line get simpler ones ("देय" -> "due",
+  "भर पाएँगी" -> "pay कर पाएँगी"), and this year's dates lose the year.
+- When someone else answered, a promise that "a colleague will call" becomes
+  "I'll try them again later": colleagues only call the customer.
 - A reply is cut to MAX_SENTENCES.
 """
 import re
+from datetime import date
 
 MAX_SENTENCES = 3
 
@@ -27,6 +32,9 @@ REPLACE = [
     (re.compile(r"\bdues\b", re.I), "EMI"),
     (re.compile(r"ओवरड्यू"), "ड्यू"),
     (re.compile(r"डिफ़ॉल्ट|डिफॉल्ट"), "पेंडिंग"),
+    # simpler words on a phone line
+    (re.compile(r"(?<![ऀ-ॿ])देय(?![ऀ-ॣ])"), "due"),
+    (re.compile(r"(?<![ऀ-ॿ])(?:भर|भुगतान कर) (पा[ऀ-ॣ]+)"), r"pay कर \1"),
 ]
 
 DROP = {
@@ -62,6 +70,9 @@ FALLBACK = {
     "hi": "क्या मैं आपकी किसी और तरह से मदद कर सकती हूँ?",
     "en": "Is there anything else I can help you with?",
 }
+COLLEAGUE = re.compile(
+    r"\b(?:colleague|team member|executive|agent)s?\b|सहयोगी|सहकर्मी|एग्जीक्यूटिव|टीम", re.I)
+
 LOCKED_FALLBACK = {
     "hi": "मैं उनसे बाद में फिर से बात करने की कोशिश करूँगी।",
     "en": "I will try to reach them again later.",
@@ -104,6 +115,31 @@ RUPEE_AMOUNT = re.compile(r"₹\s?(\d{4,})(?![\d,.])")  # ₹2200 -> ₹2,200, l
 # "2200 रुपये" or "2,200 rupees" -> "₹2,200"
 AMOUNT_THEN_RUPEES = re.compile(
     r"(?<![\d,₹])(\d{1,3}(?:,\d{3})+|\d+)\s?(?:रुपये|रुपए|rupees)", re.I)
+EN_MONTHS = ("January February March April May June July August September October "
+             "November December").split()
+_MONTH_WORD = "|".join(MONTHS)
+DATE_WITH_YEAR = re.compile(rf"(\d{{1,2}})\s+({_MONTH_WORD})\s*,?\s+(\d{{4}})", re.I)
+NUMERIC_DATE = re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b")
+
+
+def drop_this_years(text: str, this_year: int | None = None) -> str:
+    """"30 October 2026" -> "30 October" and "10-09-2026" -> "10 September", for this
+    year and next only, so a birth year is never touched."""
+    this_year = this_year or date.today().year
+    near = (this_year, this_year + 1)
+
+    def named(m):
+        return f"{m.group(1)} {m.group(2)}" if int(m.group(3)) in near else m.group(0)
+
+    def numeric(m):
+        day, month, year = (int(g) for g in m.groups())
+        if year not in near or not 1 <= month <= 12 or not 1 <= day <= 31:
+            return m.group(0)
+        return f"{day} {EN_MONTHS[month - 1]}"
+
+    return NUMERIC_DATE.sub(numeric, DATE_WITH_YEAR.sub(named, text))
+
+
 WORD = re.compile(r"[\wऀ-ॿ]+(?:-[\wऀ-ॿ]+)*")
 
 
@@ -183,6 +219,7 @@ def clean_sentence(sentence: str, locked: bool = False) -> tuple[str, str | None
     cleaned = RUPEE_AMOUNT.sub(lambda m: f"₹{int(m.group(1)):,}", cleaned)
     cleaned = AMOUNT_THEN_RUPEES.sub(
         lambda m: f"₹{int(m.group(1).replace(',', '')):,}", cleaned)
+    cleaned = drop_this_years(cleaned)
     return cleaned, ("rewritten" if cleaned != sentence else None)
 
 
@@ -196,9 +233,11 @@ class ReplyGuard:
     """Cleans one streamed reply. Feed it text as it arrives; it hands back only whole,
     checked sentences. `events` lists what was changed, for the logs."""
 
-    def __init__(self, language: str, locked: bool = False):
+    def __init__(self, language: str, locked: bool = False, third_party: bool = False):
         self.language = language
         self.locked = locked
+        self.third_party = third_party
+        self.said_try_again = False
         self.buffer = ""
         self.spoken = 0
         self.events = []
@@ -222,6 +261,13 @@ class ReplyGuard:
         if self.spoken >= MAX_SENTENCES:
             self.events.append(("too_long", sentence))
             return ""
+        if self.third_party and COLLEAGUE.search(sentence):
+            self.events.append(("colleague_for_third_party", sentence))
+            if self.said_try_again:
+                return ""
+            self.said_try_again = True
+            self.spoken += 1
+            return LOCKED_FALLBACK.get(self.language, LOCKED_FALLBACK["en"]) + " "
         cleaned, why = clean_sentence(sentence, self.locked)
         if why:
             self.events.append((why, sentence))
