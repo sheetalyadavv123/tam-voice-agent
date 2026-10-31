@@ -299,6 +299,7 @@ def call_note(call, customer, kind, today):
 
 
 async def entrypoint(ctx: agents.JobContext):
+    logger.info("database host: %s", urlparse(config.DATABASE_URL).hostname)
     session_id = uuid.uuid4()
     started_at = datetime.now(timezone.utc)
     customer_id, kind = pick_target(ctx)
