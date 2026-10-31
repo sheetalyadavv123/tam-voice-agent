@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 # Let this file import the "tools" folder in the project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from livekit import agents
+from livekit import agents, rtc
 from livekit.agents import (
     Agent, AgentSession, MetricsCollectedEvent, ModelSettings, RunContext, StopResponse,
     function_tool, get_job_context, llm, metrics, room_io,
@@ -24,8 +24,10 @@ from livekit.plugins import (
 import config
 import db
 from tools import caller_words, rules
-from tools.collection_tools import AiCallbackReason, Call, Channel, Outcome, PersonStatus
-from tools.language import LanguageTracker
+from tools.collection_tools import (
+    AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
+)
+from tools.language import LanguageTracker, turn_language
 from tools.speech_guard import ReplyGuard
 from tools.store import MemoryStore
 from tools.pg_store import PostgresStore
@@ -37,6 +39,8 @@ BASE_PROMPT = (ROOT / "prompts" / "collections.md").read_text(encoding="utf-8").
 TRANSCRIPT_DIR = ROOT / "transcripts"
 LOG_KEYS = ("ok", "next", "error", "reason", "status", "saved", "sent", "verified",
             "requested", "locked", "duplicate", "source", "loan_closed")
+REFUSED_KEYS = ("ok", "saved", "sent", "verified", "requested")
+USER_AWAY_SECONDS = 8
 
 
 def build_llm():
@@ -50,12 +54,14 @@ def build_llm():
 
 def build_tts():
     if config.TTS_PROVIDER == "sarvam":
+        logger.info("TTS: sarvam bulbul:v3 speaker=%s pace=%s", config.SARVAM_SPEAKER, config.TTS_PACE)
         return sarvam.TTS(
             target_language_code=config.SARVAM_LANGUAGE,
             model="bulbul:v3",
             speaker=config.SARVAM_SPEAKER,
-            pace=config.SARVAM_PACE,
+            pace=config.TTS_PACE,
         )
+    logger.info("TTS: elevenlabs %s voice=%s", config.TTS_MODEL, config.TTS_VOICE_ID)
     return elevenlabs.TTS(model=config.TTS_MODEL, voice_id=config.TTS_VOICE_ID)
 
 
@@ -90,23 +96,26 @@ class Collector(Agent):
         self.call = call
         self.base_instructions = instructions
         self.language = LanguageTracker(call.language)
+        self.silences = 0  # times in a row the caller went quiet
+        self._end_task = None
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         text = new_message.text_content or ""
         self.call.heard(text)
+        self.silences = 0
         line, hang_up = self._fixed_reply(text)
         if line:
             # LiveKit drops a stopped turn's message; keep it so the transcript has it
             await self._keep_in_history(new_message)
-            handle = self.session.say(line)
-            if hang_up:
-                self._end_task = asyncio.create_task(self._end_call_after(handle))
+            self._say(line, hang_up)
             raise StopResponse()
         switched = self.language.observe(text)
         if not switched:
+            if turn_language(text) not in (None, self.language.current):
+                logger.info("RULE language_hold: staying in %s for %r", self.language.current, text[:60])
             return
         name = "English" if switched == "en" else "Hindi"
-        logger.info("customer is speaking %s, switching language", name)
+        logger.info("RULE language_switch: now %s after %r", name, text[:60])
         rule = (f"# Language now\nThe customer is speaking {name}. "
                 f"Reply only in {name} from now on.")
         # update_instructions covers later turns; turn_ctx is this reply's copy
@@ -121,19 +130,72 @@ class Collector(Agent):
         Returns (line, hang_up); line is None to let the AI reply."""
         lang = self.language.current
         if self.call.unlocked and caller_words.legal_question(text):
-            logger.warning("LEGAL HANDOFF: %s", text[:120])
-            self.call.transfer_to_human("legal question")
+            logger.warning("RULE legal_handoff: %s", text[:120])
+            self.call.transfer_to_human("legal_question")
             self.call.record_outcome("human_callback", "legal question")
             return caller_words.line(caller_words.LEGAL_LINE, lang), True
+        if (self.call.promise_recorded and not self.call.link_sent_after_promise
+                and self._offered_link() and caller_words.declines(text)):
+            logger.info("RULE promise_close: link declined after a promise (%r)", text[:60])
+            self.call.record_outcome_or_better("promise_to_pay")
+            return self._promise_close(caller_words.PROMISE_CLOSE_DECLINED), True
         if self.call.person_status in (None, "third_party") and caller_words.asks_why_calling(text):
             if self.call.person_status is None:
                 if not caller_words.says_not_the_customer(text):
                     return None, False  # maybe the customer themselves; the AI confirms who
                 self.call.report_person("third_party")
-            logger.info("THIRD PARTY LINE: %s", text[:120])
+            logger.info("RULE third_party_line: %s", text[:120])
             name = self.call.first_name
             return caller_words.line(caller_words.THIRD_PARTY_LINE, lang, name=name), False
         return None, False
+
+    def _line(self, lines, **values):
+        return caller_words.line(lines, self.language.current, **values)
+
+    def _promise_close(self, lines):
+        p = self.call.promise
+        return self._line(lines, name=self.call.first_name, amount=f"{p['amount']:,}",
+                          date=f"{p['date'].day} {p['date']:%B}")
+
+    def _dob_question(self):
+        return self._line(caller_words.DOB_QUESTION, name=self.call.first_name)
+
+    def _offered_link(self):
+        """Was the agent's last message about the payment link?"""
+        for item in reversed(self.chat_ctx.items):
+            if item.type == "message" and item.role == "assistant":
+                text = (item.text_content or "").lower()
+                return "link" in text or "लिंक" in text
+        return False
+
+    def _say(self, line, hang_up=False):
+        """Speak a fixed line from the code; hang_up ends the call after it plays."""
+        handle = self.session.say(line)
+        if hang_up:
+            self._end_task = asyncio.create_task(self._end_call_after(handle))
+        return handle
+
+    def on_user_state(self, state):
+        """The session's user_state_changed event: "away" after USER_AWAY_SECONDS of silence."""
+        if state == "speaking":
+            self.silences = 0
+        elif state == "away":
+            self.on_user_away()
+
+    def on_user_away(self):
+        if self._end_task is not None:
+            return  # already hanging up
+        self.silences += 1
+        if self.silences == 1:
+            logger.info("RULE silence_check_in: caller quiet for %d s", USER_AWAY_SECONDS)
+            # LiveKit marks "away" only once; back to "listening" so a second silence is noticed
+            self.session.reset_away_timer()
+            self._say(self._line(caller_words.SILENCE_CHECK))
+            return
+        logger.info("RULE silence_close: caller quiet twice in a row, ending the call")
+        if self.call.outcome is None:
+            self.call.record_outcome_or_better("no_resolution", "customer silent")
+        self._say(self._line(caller_words.SILENCE_CLOSE), hang_up=True)
 
     async def _keep_in_history(self, message):
         ctx = self.chat_ctx.copy()
@@ -151,8 +213,11 @@ class Collector(Agent):
 
     async def llm_node(self, chat_ctx, tools, model_settings: ModelSettings):
         # Every reply passes through ReplyGuard before it is spoken or saved.
+        # A confirmed customer who still owes a DOB hears the DOB question, not "I'll try later"
+        needs_dob = self.call.person_status == "customer" and not self.call.unlocked
         guard = ReplyGuard(self.language.current, locked=not self.call.unlocked,
-                           third_party=self.call.person_status == "third_party")
+                           third_party=self.call.person_status == "third_party",
+                           locked_fallback=self._dob_question() if needs_dob else None)
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             if isinstance(chunk, str):
                 text = guard.feed(chunk)
@@ -169,7 +234,7 @@ class Collector(Agent):
         if rest:
             yield rest
         for why, sentence in guard.events:
-            logger.warning("SPEECH GUARD %s: %s", why, sentence[:120])
+            logger.warning("RULE speech_guard_%s: %s", why, sentence[:120])
 
     def _run(self, name, fn, *args):
         try:
@@ -178,6 +243,9 @@ class Collector(Agent):
             logger.exception("tool %s failed", name)
             return {"error": "tool_failed", "next": "apologise_and_offer_colleague_callback"}
         logger.info("TOOL %s -> %s", name, {k: result[k] for k in LOG_KEYS if k in result})
+        why = result.get("reason") or result.get("error")
+        if why and any(result.get(k) is False for k in REFUSED_KEYS):
+            logger.info("RULE %s_refused: %s", name, why)
         return result
 
     @function_tool()
@@ -192,7 +260,12 @@ class Collector(Agent):
                 the customer says they cannot talk right now. If you could not understand
                 their answer, don't call this yet. Ask once more first.
         """
-        return self._run("report_person", self.call.report_person, status)
+        result = self._run("report_person", self.call.report_person, status)
+        if result.get("next") == "ask_date_of_birth":
+            logger.info("RULE dob_question: spoken by code after report_person")
+            self._say(self._dob_question())
+            raise StopResponse()
+        return result
 
     @function_tool()
     async def verify_identity(self, context: RunContext, day: int, month: int, year: int) -> dict:
@@ -204,7 +277,23 @@ class Collector(Agent):
             month: Month number, 1 to 12.
             year: Full four-digit year, for example 1985. Ask again if only two digits.
         """
-        return self._run("verify_identity", self.call.verify_identity, day, month, year)
+        result = self._run("verify_identity", self.call.verify_identity, day, month, year)
+        if result.get("locked"):
+            logger.info("RULE dob_failed_close: too many wrong dates of birth, ending the call")
+            self.call.transfer_to_human("identity_check_failed")
+            self.call.record_outcome_or_better("human_callback", "identity check failed")
+            self._say(self._line(caller_words.DOB_FAILED_CLOSE), hang_up=True)
+            raise StopResponse()
+        if result.get("next") == "ask_for_date_of_birth":
+            logger.info("RULE dob_question: caller has not said a date yet")
+            self._say(self._dob_question())
+            raise StopResponse()
+        if result.get("verified") is False and (
+                "attempts_left" in result or result.get("error") == "impossible_date"):
+            logger.info("RULE dob_retry: date of birth did not match, asking again")
+            self._say(self._line(caller_words.DOB_RETRY, name=self.call.first_name))
+            raise StopResponse()
+        return result
 
     @function_tool()
     async def get_due_details(self, context: RunContext) -> dict:
@@ -220,7 +309,13 @@ class Collector(Agent):
         Args:
             channel: "sms" or "whatsapp", whichever the customer prefers.
         """
-        return self._run("send_payment_link", self.call.send_payment_link, channel)
+        result = self._run("send_payment_link", self.call.send_payment_link, channel)
+        if result.get("sent") and self.call.promise_recorded:
+            logger.info("RULE promise_close: link sent after a promise, ending the call")
+            self.call.record_outcome_or_better("promise_to_pay")
+            self._say(self._promise_close(caller_words.PROMISE_CLOSE_SENT), hang_up=True)
+            raise StopResponse()
+        return result
 
     @function_tool()
     async def check_payment_status(self, context: RunContext) -> dict:
@@ -267,12 +362,14 @@ class Collector(Agent):
         return self._run("record_outcome", self.call.record_outcome, outcome, note)
 
     @function_tool()
-    async def transfer_to_human(self, context: RunContext, reason: str) -> dict:
+    async def transfer_to_human(self, context: RunContext, reason: HandoffReason) -> dict:
         """Ask for a human colleague to call the customer back. This does not connect the
         call to anyone.
 
         Args:
-            reason: A short reason, for example "customer reports hardship".
+            reason: Why. "customer_asked_for_person" only if the customer asked for one.
+                After a promise is saved, only legal_question, hardship, dispute or
+                customer_asked_for_person are accepted.
         """
         return self._run("transfer_to_human", self.call.transfer_to_human, reason)
 
@@ -340,6 +437,7 @@ async def entrypoint(ctx: agents.JobContext):
         vad=silero.VAD.load(),
         turn_handling={"endpointing": {"min_delay": config.ENDPOINT_MIN_DELAY,
                                        "max_delay": config.ENDPOINT_MAX_DELAY}},
+        user_away_timeout=USER_AWAY_SECONDS,
     )
 
     @session.on("metrics_collected")
@@ -349,7 +447,7 @@ async def entrypoint(ctx: agents.JobContext):
     async def finish():
         ended_at = datetime.now(timezone.utc)
         if call.finalize_outcome():
-            logger.warning("no outcome was recorded, code set %s", call.outcome)
+            logger.warning("RULE outcome_filled_by_code: %s", call.outcome)
         store.set_attempt_outcome(str(session_id), call.outcome)
         if persistent:
             try:
@@ -375,11 +473,40 @@ async def entrypoint(ctx: agents.JobContext):
             (TRANSCRIPT_DIR / f"{session_id}.json").write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    ctx.add_shutdown_callback(finish)
+    # Save as soon as the customer hangs up, not when the process exits. The three
+    # triggers share one task, so the store is flushed once.
+    saving = None
+
+    def save_now(why):
+        nonlocal saving
+        if saving is None:
+            logger.info("RULE save_on_end: %s, saving the call now", why)
+            saving = asyncio.ensure_future(finish())
+        return saving
+
+    @ctx.room.on("participant_disconnected")
+    def _on_left(participant: rtc.RemoteParticipant):
+        if participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_AGENT:
+            save_now("customer disconnected")
+
+    @session.on("close")
+    def _on_close(ev):
+        save_now("session closed")
+
+    async def _on_shutdown():
+        await save_now("process shutting down")
+
+    ctx.add_shutdown_callback(_on_shutdown)
+
+    agent = Collector(call, BASE_PROMPT + note)
+
+    @session.on("user_state_changed")
+    def _on_user_state(ev):
+        agent.on_user_state(ev.new_state)
 
     await session.start(
         room=ctx.room,
-        agent=Collector(call, BASE_PROMPT + note),
+        agent=agent,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=noise_cancellation.BVC(),

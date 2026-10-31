@@ -8,6 +8,7 @@ from tools.rules import IST
 from tools.store import MemoryStore
 
 NOW = datetime(2026, 10, 28, 11, 0, tzinfo=IST)
+FAR = datetime(2100, 1, 1, tzinfo=IST)
 
 
 @pytest.fixture(autouse=True)
@@ -281,7 +282,7 @@ def test_callback_scheduled_when_the_caller_gives_a_time(store):
 def test_no_colleague_handover_for_a_third_party(store):
     c = make_call(store, "C002")
     c.report_person("third_party")
-    assert c.transfer_to_human("wants the amount") == {
+    assert c.transfer_to_human("info_not_available") == {
         "requested": False, "reason": "not_the_customer",
         "next": "say_we_will_try_the_customer_again_later"}
     assert c.handoff_requested is False and c.handoff_callback_id is None
@@ -354,3 +355,71 @@ def test_third_party_call_is_logged_as_third_party(store):
     assert c.record_outcome("not_available") == {
         "saved": False, "error": "someone_else_answered", "use": "third_party"}
     assert c.record_outcome("third_party")["saved"] is True
+
+
+# ---- batch 2, item 1: a promise ends the payment push ----
+
+def promised(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    assert c.record_promise_to_pay(30, 10, 2026)["saved"] is True
+    return c
+
+
+def test_link_after_a_promise_says_close(store):
+    c = promised(store)
+    c.heard("SMS pe bhej do")
+    r = c.send_payment_link("sms")
+    assert r["sent"] is True and r["next"] == "say_link_sent_remind_date_and_close"
+    assert c.link_sent_after_promise is True
+
+
+def test_link_before_a_promise_asks_to_pay(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    c.heard("SMS")
+    assert c.send_payment_link("sms")["next"] == "ask_caller_to_pay_then_tell_you"
+
+
+def test_pending_after_a_promise_closes_never_offers_a_callback(store):
+    c = promised(store)
+    c.heard("SMS")
+    c.send_payment_link("sms")
+    for _ in range(3):
+        assert c.check_payment_status() == {"status": "pending", "next": "remind_promise_date_and_close"}
+
+
+@pytest.mark.parametrize("reason", ["customer_upset", "refused_to_pay", "payment_not_found",
+                                    "info_not_available", "tool_error"])
+def test_handover_refused_after_a_promise(store, reason):
+    c = promised(store)
+    r = c.transfer_to_human(reason)
+    assert r["requested"] is False and r["reason"] == "promise_already_recorded"
+    assert c.handoff_requested is False and store.callbacks_due(FAR) == []
+
+
+@pytest.mark.parametrize("reason", ["legal_question", "hardship", "dispute"])
+def test_handover_still_allowed_after_a_promise(store, reason):
+    c = promised(store)
+    assert c.transfer_to_human(reason)["requested"] is True
+
+
+def test_asking_for_a_person_needs_the_callers_words(store):
+    c = promised(store)
+    c.heard("okay")
+    assert c.transfer_to_human("customer_asked_for_person")["reason"] == "caller_did_not_ask_for_a_person"
+    c.heard("kisi insaan se baat karao")
+    assert c.transfer_to_human("customer_asked_for_person")["requested"] is True
+
+
+def test_free_text_handover_reason_is_refused(store):
+    c = make_call(store, "C002")
+    c.report_person("customer")
+    r = c.transfer_to_human("customer reports hardship")
+    assert r["requested"] is False and r["error"] == "invalid_reason"
+
+
+def test_code_outcome_uses_the_better_label(store):
+    c = promised(store)
+    assert c.record_outcome_or_better("no_resolution", "customer silent") == {"saved": True}
+    assert c.outcome == "promise_to_pay"

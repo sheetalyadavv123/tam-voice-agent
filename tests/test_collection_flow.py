@@ -188,18 +188,18 @@ def test_outcomes_for_promise_and_payment(store):
 # ---------- human handover ----------
 def test_transfer_creates_one_callback(store):
     c = unlocked_call(store, "C008")
-    r = c.transfer_to_human("customer upset")
+    r = c.transfer_to_human("customer_upset")
     assert r["requested"] is True and "colleague" in r["next"]
-    c.transfer_to_human("customer upset")
+    c.transfer_to_human("customer_upset")
     assert len(store.callbacks_due(FAR)) == 1
-    assert c.outcome == "human_callback" and c.note == "customer upset"
+    assert c.outcome == "human_callback" and c.note == "customer_upset"
     assert c.handoff_requested is True
 
 
 def test_transfer_keeps_existing_outcome(store):
     c = unlocked_call(store, "C008")
     c.record_outcome("dispute")
-    c.transfer_to_human("needs a person")
+    c.transfer_to_human("dispute")
     assert c.outcome == "dispute"
 
 

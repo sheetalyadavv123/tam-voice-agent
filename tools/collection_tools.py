@@ -1,10 +1,13 @@
 """The state of one collection call, and the tools the AI may use during it."""
+import logging
 from datetime import datetime
 
 from tools import caller_words, policy, rules
 from tools.rules import IST
 from tools.store import CHANNELS
 from typing import Literal
+
+logger = logging.getLogger("tam-voice-agent")
 
 PERSON_STATUSES = {"customer", "third_party", "unavailable"}
 CALLBACK_REASONS = {"customer_unavailable", "customer_requested", "human_followup", "payment_help"}
@@ -16,6 +19,14 @@ OUTCOMES = {
 
 WEAKER_OUTCOMES = {"no_resolution", "refused", "callback_requested", "not_available"}
 
+HANDOFF_REASONS = {
+    "legal_question", "hardship", "dispute", "customer_asked_for_person", "customer_upset",
+    "refused_to_pay", "promise_date_too_far", "payment_not_found", "partial_payment",
+    "info_not_available", "tool_error", "identity_check_failed",
+}
+# After a promise the payment push is over; only these still reach a colleague.
+HANDOFF_AFTER_PROMISE = {"legal_question", "hardship", "dispute", "customer_asked_for_person"}
+
 PersonStatus = Literal["customer", "third_party", "unavailable"]
 Channel = Literal["sms", "whatsapp"]
 AiCallbackReason = Literal["customer_unavailable", "customer_requested"]
@@ -23,6 +34,11 @@ Outcome = Literal[
     "paid_now", "promise_to_pay", "already_paid_confirmed", "already_paid_unconfirmed",
     "dispute", "hardship", "refused", "third_party", "wrong_number", "not_available",
     "callback_requested", "human_callback", "no_resolution",
+]
+HandoffReason = Literal[
+    "legal_question", "hardship", "dispute", "customer_asked_for_person", "customer_upset",
+    "refused_to_pay", "promise_date_too_far", "payment_not_found", "partial_payment",
+    "info_not_available", "tool_error", "identity_check_failed",
 ]
 
 
@@ -49,6 +65,7 @@ class Call:
         self.payment_confirmed = False
         self.prior_payment_seen = False
         self.promise_recorded = False
+        self.promise = None  # {"date": date, "amount": int} once one is saved
         self.links_before_promise = None  # after a promise, only one more link may go out
         self.pending_checks = 0
         self.callback_id = None
@@ -68,6 +85,11 @@ class Call:
     @property
     def language(self):
         return self._customer.get("language", "hi")
+
+    @property
+    def link_sent_after_promise(self):
+        return (self.links_before_promise is not None
+                and self.store.links_sent_in_session(self.session_id) > self.links_before_promise)
 
     @property
     def unlocked(self):
@@ -203,8 +225,12 @@ class Call:
                     "next": "offer_promise_or_callback"}
         link = self.store.add_payment_link(
             self.customer_id, loan["emi_amount"], named, self.session_id)
+        nxt = "ask_caller_to_pay_then_tell_you"
+        if self.promise_recorded:
+            nxt = "say_link_sent_remind_date_and_close"
+            logger.info("RULE promise_ends_push: link sent after a promise, closing")
         return {"sent": True, "channel": named, "to_number_ending": self._number_ending(),
-                "amount": link["amount"], "next": "ask_caller_to_pay_then_tell_you"}
+                "amount": link["amount"], "next": nxt}
 
     def _number_ending(self):
         digits = "".join(ch for ch in self._customer["phone"] if ch.isdigit())
@@ -241,6 +267,9 @@ class Call:
                     "source": "company_records", "next": "say_it_is_being_processed_and_close"}
         if mine:
             self.pending_checks += 1
+            if self.promise_recorded:
+                logger.info("RULE promise_ends_push: payment pending after a promise, closing")
+                return {"status": "pending", "next": "remind_promise_date_and_close"}
             nxt = "offer_promise_or_callback" if self.pending_checks >= 2 else "ask_if_they_have_paid_yet"
             return {"status": "pending", "next": nxt}
         return {"status": "none", "next": "ask_when_they_can_pay"}
@@ -262,6 +291,7 @@ class Call:
             if other["id"] != saved["id"]:
                 self.store.set_promise_status(other["id"], "cancelled")
         self.promise_recorded = True
+        self.promise = {"date": check["date"], "amount": saved["amount"]}
         if self.links_before_promise is None:
             self.links_before_promise = self.store.links_sent_in_session(self.session_id)
         d = check["date"]
@@ -345,11 +375,26 @@ class Call:
         self.note = (self.note + " [outcome filled in by code]").strip()[:200]
         return True
 
+    def record_outcome_or_better(self, outcome, note=""):
+        """record_outcome for code paths: if the records show a better label, use it."""
+        result = self.record_outcome(outcome, note)
+        if not result.get("saved") and result.get("use"):
+            result = self.record_outcome(result["use"], note)
+        return result
+
     # ---- tool: ask for a human (a callback until real transfers exist) ----
     def transfer_to_human(self, reason):
+        if reason not in HANDOFF_REASONS:
+            return {"requested": False, "error": "invalid_reason", "allowed": sorted(HANDOFF_REASONS)}
         if self.person_status == "third_party":  # a colleague calls the customer, not them
             return {"requested": False, "reason": "not_the_customer",
                     "next": "say_we_will_try_the_customer_again_later"}
+        if reason == "customer_asked_for_person" and not caller_words.asks_for_person(self.caller_lines):
+            return {"requested": False, "reason": "caller_did_not_ask_for_a_person",
+                    "next": "continue_the_conversation"}
+        if self.promise_recorded and reason not in HANDOFF_AFTER_PROMISE:
+            return {"requested": False, "reason": "promise_already_recorded",
+                    "next": "remind_promise_date_and_close"}
         self.handoff_requested = True
         if self.handoff_callback_id is None:
             due = rules.next_window_start(self.clock())

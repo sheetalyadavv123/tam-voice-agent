@@ -41,7 +41,7 @@
     - {call: check_payment_status, expect: {status: none}}
     - {call: record_outcome, args: {outcome: already_paid_confirmed}, expect: {saved: false, error: not_supported_by_records}}
     - {call: record_outcome, args: {outcome: already_paid_unconfirmed, note: "customer says paid, no record"}, expect: {saved: true}}
-    - {call: transfer_to_human, args: {reason: "payment dispute"}, expect: {requested: true}}
+    - {call: transfer_to_human, args: {reason: dispute}, expect: {requested: true}}
   final:
     summary: {outcome: already_paid_unconfirmed, handoff_requested: true}
     callbacks_open: 1
@@ -87,7 +87,7 @@
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: get_due_details, expect: {emi_amount: 1800, overdue_days: 95}}
     - {call: record_outcome, args: {outcome: hardship}, expect: {saved: true}}
-    - {call: transfer_to_human, args: {reason: "customer reports hardship"}, expect: {requested: true}}
+    - {call: transfer_to_human, args: {reason: hardship}, expect: {requested: true}}
   final:
     summary: {outcome: hardship, handoff_requested: true}
     callbacks_open: 1
@@ -98,7 +98,7 @@
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: record_promise_to_pay, args: {day: 20, month: 11, year: 2026}, expect: {saved: false, reason: too_far, next: offer_human_callback}}
     - {call: record_promise_to_pay, args: {day: 31, month: 2, year: 2026}, expect: {saved: false, reason: impossible_date}}
-    - {call: transfer_to_human, args: {reason: "wants a later date"}, expect: {requested: true}}
+    - {call: transfer_to_human, args: {reason: promise_date_too_far}, expect: {requested: true}}
   final:
     summary: {outcome: human_callback, promise_recorded: false}
     promises: {open: 0}
@@ -127,7 +127,7 @@
     - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {error: impossible_date}}
     - {call: verify_identity, args: {day: 31, month: 2, year: 1990}, expect: {locked: true}}
     - {call: get_due_details, expect: {error: not_unlocked}}
-    - {call: transfer_to_human, args: {reason: "could not verify"}, expect: {requested: true}}
+    - {call: transfer_to_human, args: {reason: identity_check_failed}, expect: {requested: true}}
   final:
     summary: {handoff_requested: true, dob_verified: false}
     callbacks_open: 1
