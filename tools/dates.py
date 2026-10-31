@@ -88,3 +88,14 @@ def dates_said(text: str, today: date) -> list[date]:
         if candidates:
             out.append(min(candidates, key=lambda d: abs((d - today).days)))
     return out
+
+
+def say_when(when, language):
+    """"Monday 2 November, दोपहर 12 बजे" or "Monday 2 November at 12 pm"."""
+    clock = f"{when.hour % 12 or 12}" + (f":{when.minute:02d}" if when.minute else "")
+    day = f"{when:%A} {when.day} {when:%B}"
+    if language == "hi":
+        part = ("सुबह" if when.hour < 12 else "दोपहर" if when.hour < 16
+                else "शाम" if when.hour < 20 else "रात")
+        return f"{day}, {part} {clock} बजे"
+    return f"{day} at {clock} {'am' if when.hour < 12 else 'pm'}"

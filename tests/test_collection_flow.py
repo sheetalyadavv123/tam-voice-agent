@@ -12,11 +12,6 @@ NOW = datetime(2026, 10, 28, 11, 0, tzinfo=IST)
 FAR = datetime(2026, 12, 1, tzinfo=IST)
 
 
-@pytest.fixture(autouse=True)
-def default_mode(monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_only")
-
-
 @pytest.fixture
 def store():
     return MemoryStore.from_files(clock=lambda: NOW)

@@ -199,3 +199,31 @@ def test_two_calls_with_the_same_date_save_one_row():
 
     rows = asyncio.run(go())
     assert [(r["promised_date"], r["status"]) for r in rows] == [(date(2026, 10, 30), "open")]
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_promise_by_a_relative_saves_its_note_and_is_rolled_back():
+    from tools.collection_tools import Call
+
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            s = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+            call = Call(s, "C002", session_id=SESSION, clock=lambda: NOW)
+            call.heard("nahi, main unka bhai Rahul bol raha hoon")
+            call.report_person("third_party")
+            call.third_party = {"relationship": "brother", "name": "Rahul", "shared": True}
+            assert call.record_promise_to_pay(30, 10, 2026)["saved"] is True
+            await s.flush(conn=conn)
+            return await conn.fetch(
+                "SELECT promised_date, status, note FROM promises WHERE session_id = $1",
+                uuid.UUID(SESSION))
+        finally:
+            await tr.rollback()
+            await conn.close()
+
+    rows = asyncio.run(go())
+    assert [(r["promised_date"], r["status"], r["note"]) for r in rows] == [
+        (date(2026, 10, 30), "open", "promised by brother Rahul")]

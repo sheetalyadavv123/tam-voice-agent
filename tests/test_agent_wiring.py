@@ -43,8 +43,9 @@ def test_ai_callback_reasons_are_allowed_ones():
     assert set(get_args(AiCallbackReason)) <= CALLBACK_REASONS
 
 
-def test_agent_registers_exactly_the_nine_tools():
-    assert set(_agent_tools()) == set(TOOLS)
+def test_agent_registers_the_tools_except_the_dob_check():
+    # the code reads the date of birth itself, so the AI has no verify_identity tool
+    assert set(_agent_tools()) == set(TOOLS) - {"verify_identity"}
 
 
 def test_agent_tool_inputs_match_the_call_methods():
@@ -81,3 +82,13 @@ def test_tts_pace_from_env(value, expected):
 def test_tts_pace_out_of_range_stops_startup(value):
     run = _pace(value)
     assert run.returncode != 0 and "TTS_PACE must be between 0.5 and 2.0" in run.stderr
+
+
+
+def test_startup_logs_stt_language_and_model():
+    assert 'logger.info("STT_LANGUAGE=%s LLM_MODEL=%s", config.STT_LANGUAGE, config.LLM_MODEL)' in MAIN_SRC
+
+
+def test_third_party_disclosure_defaults_to_dob_verified():
+    from tools import policy
+    assert policy.THIRD_PARTY_DISCLOSURE == (os.getenv("THIRD_PARTY_DISCLOSURE") or "dob_verified")

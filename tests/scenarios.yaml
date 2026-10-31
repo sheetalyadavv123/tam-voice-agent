@@ -124,11 +124,12 @@
     summary: {outcome: no_resolution}
     promises: {open: 0}
 
-- name: dob_mode_impossible_dates
+- name: someone_else_then_claims_customer_impossible_dates
   customer: C002
-  mode: name_plus_dob
   steps:
-    - {hear: "haan ji"}
+    - {hear: "main unki behen bol rahi hoon"}
+    - {call: report_person, args: {status: third_party}, expect: {ok: true}}
+    - {hear: "sorry, main hi Sunita hoon"}
     - {call: report_person, args: {status: customer}, expect: {ok: true, next: ask_date_of_birth}}
     - {call: get_due_details, expect: {error: not_unlocked}}
     - {hear: "31 February 1990"}

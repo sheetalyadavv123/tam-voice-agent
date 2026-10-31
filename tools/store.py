@@ -88,15 +88,16 @@ class MemoryStore:
         return [dict(a) for a in self._attempts if a["customer_id"] == customer_id]
 
     # ---- promises to pay ----
-    def add_promise(self, customer_id, promised_date, amount, session_id=None):
-        """Saving the same open promise twice returns the first one (duplicate=True)."""
+    def add_promise(self, customer_id, promised_date, amount, session_id=None, note=None):
+        """Saving the same open promise twice returns the first one (duplicate=True).
+        note: who promised, when it was not the customer ("promised by brother Rahul")."""
         for p in self._promises:
             if (p["customer_id"] == customer_id and p["promised_date"] == promised_date
                     and p["status"] == "open"):
                 return {**p, "duplicate": True}
         p = {"id": self._next_id("promise"), "customer_id": customer_id,
              "promised_date": promised_date, "amount": amount, "status": "open",
-             "session_id": session_id, "created_at": self._clock()}
+             "session_id": session_id, "created_at": self._clock(), "note": note}
         self._promises.append(p)
         return {**p, "duplicate": False}
 
@@ -161,6 +162,14 @@ class MemoryStore:
         for c in self._callbacks:
             if c["id"] == callback_id:
                 c["status"] = status
+                return dict(c)
+        return None
+
+    def set_callback_reason(self, callback_id, reason):
+        """Hand a callback made in this call to a colleague (same caveat as set_callback_due)."""
+        for c in self._callbacks:
+            if c["id"] == callback_id:
+                c["reason"] = reason
                 return dict(c)
         return None
 

@@ -12,14 +12,17 @@ NOW = datetime(2026, 10, 28, 11, 0, tzinfo=IST)
 FAR = datetime(2100, 1, 1, tzinfo=IST)
 
 
-@pytest.fixture(autouse=True)
-def default_mode(monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_only")
-
-
 @pytest.fixture
 def store():
     return MemoryStore.from_files(clock=lambda: NOW)
+
+
+def claimed(c):
+    """Someone first says they are the sister, then that they are Sunita after all."""
+    c.heard("main unki behen bol rahi hoon")
+    c.report_person("third_party")
+    c.heard("sorry, main hi Sunita hoon")
+    return c.report_person("customer")
 
 
 def make_call(store, customer_id="C002"):
@@ -72,10 +75,9 @@ def test_verify_needs_person_first(store):
     assert make_call(store).verify_identity(2, 11, 1985) == {"error": "confirm_person_first"}
 
 
-def test_dob_mode_requires_dob(store, monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+def test_claimed_customer_needs_dob(store):
     c = make_call(store, "C002")
-    assert confirmed(c)["next"] == "ask_date_of_birth"
+    assert claimed(c)["next"] == "ask_date_of_birth"
     c.heard("2 November 1985")
     assert c.get_due_details() == {"error": "not_unlocked"}
     assert c.verify_identity(1, 1, 2000) == {"verified": False, "attempts_left": 2}
@@ -83,10 +85,9 @@ def test_dob_mode_requires_dob(store, monkeypatch):
     assert c.get_due_details()["emi_amount"] == 2200
 
 
-def test_dob_lockout(store, monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+def test_dob_lockout(store):
     c = make_call(store, "C002")
-    confirmed(c)
+    claimed(c)
     c.heard("2 November 1985")
     c.verify_identity(1, 1, 2000)
     c.verify_identity(2, 2, 2000)
@@ -96,20 +97,18 @@ def test_dob_lockout(store, monkeypatch):
     assert c.get_due_details() == {"error": "not_unlocked"}
 
 
-def test_impossible_dates_do_not_use_attempts(store, monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+def test_impossible_dates_do_not_use_attempts(store):
     c = make_call(store, "C002")
-    confirmed(c)
+    claimed(c)
     c.heard("2 November 1985")
     assert c.verify_identity(31, 2, 1990)["error"] == "impossible_date"
     assert c.verify_identity(31, 2, 1990)["error"] == "impossible_date"
     assert c.verify_identity(1, 1, 2000) == {"verified": False, "attempts_left": 2}
 
 
-def test_impossible_dates_cap_hands_over(store, monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+def test_impossible_dates_cap_hands_over(store):
     c = make_call(store, "C002")
-    confirmed(c)
+    claimed(c)
     c.heard("2 November 1985")
     c.verify_identity(31, 2, 1990)
     c.verify_identity(31, 2, 1990)
@@ -117,10 +116,9 @@ def test_impossible_dates_cap_hands_over(store, monkeypatch):
     assert c.handoff_requested is True and c.dob_attempts == 0
 
 
-def test_two_digit_year_rejected(store, monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+def test_two_digit_year_rejected(store):
     c = make_call(store, "C002")
-    confirmed(c)
+    claimed(c)
     c.heard("2 November 1985")
     assert c.verify_identity(2, 11, 85)["error"] == "impossible_date"
 
@@ -146,10 +144,9 @@ def test_reminder_facts_come_with_report_person(store):
     assert r["due"]["emi_amount"] == 2200 and r["due"]["due_date"] == "2026-09-10"
 
 
-def test_reminder_facts_come_with_verified_dob(store, monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+def test_reminder_facts_come_with_verified_dob(store):
     c = make_call(store, "C002")
-    assert "due" not in confirmed(c)
+    assert "due" not in claimed(c)
     c.heard("2 November 1985")
     c.heard("2 November 1985")
     r = c.verify_identity(2, 11, 1985)
@@ -164,11 +161,10 @@ def test_repeated_customer_report_is_harmless(store):
     assert c.unlocked
 
 
-def test_repeated_customer_report_still_asks_dob_when_needed(store, monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+def test_repeated_customer_report_still_asks_dob_when_needed(store):
     c = make_call(store, "C002")
-    confirmed(c)
-    assert confirmed(c)["next"] == "ask_date_of_birth"
+    claimed(c)
+    assert c.report_person("customer")["next"] == "ask_date_of_birth"
 
 
 def test_only_one_link_after_a_promise(store):
@@ -596,3 +592,55 @@ def test_callback_without_a_handoff_is_its_own(store):
     c.heard("kal 4 baje")
     assert "updated" not in c.schedule_callback(29, 10, 2026, 16, 0, "customer_requested")
     assert len(store.callbacks_due(FAR)) == 1
+
+
+# ---- batch 4 combined ----
+
+def test_a_second_callback_moves_the_first(store):
+    c = make_call(store, "C002")
+    confirmed(c)
+    c.heard("kal 4 baje")
+    c.schedule_callback(29, 10, 2026, 16, 0, "customer_requested")
+    c.heard("nahi, kal 5 baje")
+    r = c.schedule_callback(29, 10, 2026, 17, 0, "customer_requested")
+    assert r["updated"] == "callback"
+    assert [cb["due_at"].hour for cb in store._callbacks] == [17]
+
+
+def test_callback_then_handoff_is_still_one_callback(store):
+    c = make_call(store, "C002")
+    confirmed(c)
+    c.heard("kal 4 baje call karna")
+    c.schedule_callback(29, 10, 2026, 16, 0, "customer_requested")
+    c.heard("aur mujhe kisi insaan se baat karni hai")
+    c.transfer_to_human("customer_asked_for_person")
+    assert [(cb["reason"], cb["due_at"].hour) for cb in store._callbacks] == [("human_followup", 16)]
+
+
+def test_hardship_with_a_date_refuses_a_colleague_except_for_legal(store):
+    c = make_call(store, "C002")
+    confirmed(c)
+    c.hardship = "with_date"
+    assert c.transfer_to_human("hardship")["reason"] == "hardship_with_a_pay_date"
+    assert c.transfer_to_human("legal_question")["requested"] is True
+
+
+def test_dob_tries_are_shared_by_whoever_says_it(store):
+    c = make_call(store, "C002")
+    c.heard("main unka bhai hoon")
+    c.report_person("third_party")
+    assert c.check_dob(1, 1, 1990) == {"verified": False, "attempts_left": 2}
+    assert c.check_dob(31, 2, 1990)["error"] == "impossible_date" and c.dob_attempts == 1
+    c.check_dob(2, 1, 1990)
+    assert c.check_dob(3, 1, 1990)["locked"] is True
+
+
+def test_third_party_check_unlocks_only_when_shared(store):
+    c = make_call(store, "C002")
+    c.heard("main unka bhai hoon")
+    c.report_person("third_party")
+    c.third_party = {"relationship": "brother", "name": "Rahul", "shared": False}
+    assert c.get_due_details() == {"error": "not_unlocked"}
+    c.third_party["shared"] = True
+    assert c.get_due_details()["emi_amount"] == 2200
+    assert c.promised_by == "brother Rahul"

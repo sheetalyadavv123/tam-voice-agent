@@ -8,7 +8,8 @@ PROMPT = (Path(__file__).parent.parent / "prompts" / "collections.md").read_text
 
 
 def test_prompt_mentions_every_tool():
-    missing = [t for t in TOOLS if t not in PROMPT]
+    # verify_identity is not the AI's: the code reads the date of birth itself
+    missing = [t for t in TOOLS if t not in PROMPT and t != "verify_identity"]
     assert missing == [], f"prompt never mentions: {missing}"
 
 

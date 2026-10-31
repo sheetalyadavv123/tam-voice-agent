@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from tools import policy, simulator
+from tools import simulator
 from tools.collection_tools import Call
 from tools.rules import IST
 from tools.store import MemoryStore
@@ -56,33 +56,28 @@ def _check_final(name, call, store, final):
 def run_scenario(sc, now=NOW):
     """Returns {"failures": [...], "log": [...]}. An empty failures list means it passed."""
     failures, log = [], []
-    old_mode = policy.VERIFICATION_MODE
-    policy.VERIFICATION_MODE = sc.get("mode", "name_only")
-    try:
-        store = MemoryStore.from_files(clock=lambda: now)
-        call = Call(store, sc["customer"], session_id=sc["name"], clock=lambda: now)
-        for number, step in enumerate(sc["steps"], 1):
-            if "world" in step:
-                _world(store, sc["customer"], step)
-                log.append(f"   {number}. (world) {step['world']}")
-                continue
-            if "hear" in step:
-                call.heard(step["hear"])
-                log.append(f"   {number}. (caller) {step['hear']}")
-                continue
-            tool = step["call"]
-            if tool not in TOOLS:
-                failures.append(f"{sc['name']} step {number}: unknown tool '{tool}'")
-                continue
-            result = getattr(call, tool)(**step.get("args", {}))
-            log.append(f"   {number}. {tool}({step.get('args', {})}) -> {result}")
-            if not matches(result, step.get("expect", {})):
-                failures.append(
-                    f"{sc['name']} step {number} {tool}: expected {step.get('expect')}, got {result}")
-            for key in step.get("expect_absent", []):
-                if key in result:
-                    failures.append(f"{sc['name']} step {number} {tool}: '{key}' must not appear")
-        failures += _check_final(sc["name"], call, store, sc.get("final", {}))
-    finally:
-        policy.VERIFICATION_MODE = old_mode
+    store = MemoryStore.from_files(clock=lambda: now)
+    call = Call(store, sc["customer"], session_id=sc["name"], clock=lambda: now)
+    for number, step in enumerate(sc["steps"], 1):
+        if "world" in step:
+            _world(store, sc["customer"], step)
+            log.append(f"   {number}. (world) {step['world']}")
+            continue
+        if "hear" in step:
+            call.heard(step["hear"])
+            log.append(f"   {number}. (caller) {step['hear']}")
+            continue
+        tool = step["call"]
+        if tool not in TOOLS:
+            failures.append(f"{sc['name']} step {number}: unknown tool '{tool}'")
+            continue
+        result = getattr(call, tool)(**step.get("args", {}))
+        log.append(f"   {number}. {tool}({step.get('args', {})}) -> {result}")
+        if not matches(result, step.get("expect", {})):
+            failures.append(
+                f"{sc['name']} step {number} {tool}: expected {step.get('expect')}, got {result}")
+        for key in step.get("expect_absent", []):
+            if key in result:
+                failures.append(f"{sc['name']} step {number} {tool}: '{key}' must not appear")
+    failures += _check_final(sc["name"], call, store, sc.get("final", {}))
     return {"failures": failures, "log": log}
