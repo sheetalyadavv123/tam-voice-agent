@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import confirmed
 from tools import simulator
 from tools.collection_tools import Call
 from tools.followups import run_due_followups
@@ -47,7 +48,7 @@ def test_promise_then_followup_paid():
 
     store = MemoryStore.from_files(clock=clock)
     first = Call(store, "C002", session_id="r1", clock=clock)
-    first.report_person("customer")
+    confirmed(first)
     assert first.record_promise_to_pay(28, 10, 2026)["saved"] is True
     first.record_outcome("promise_to_pay")
 
@@ -58,7 +59,7 @@ def test_promise_then_followup_paid():
     assert mine(run_due_followups(store, clock())) == ["call"]
 
     follow = Call(store, "C002", session_id="f1", clock=clock)
-    follow.report_person("customer")
+    confirmed(follow)
     assert follow.get_due_details()["open_promise"] == {"date": "2026-10-28", "amount": 2200}
     follow.heard("SMS bhej do")
     follow.send_payment_link("sms")
@@ -73,5 +74,6 @@ def test_promise_then_followup_paid():
 def test_runner_catches_a_wrong_expectation():
     """Proves a scenario can actually fail, so a pass means something."""
     bad = {"name": "bad", "customer": "C002", "steps": [
+        {"hear": "haan ji"},
         {"call": "report_person", "args": {"status": "customer"}, "expect": {"ok": False}}]}
     assert run_scenario(bad)["failures"] != []

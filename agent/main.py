@@ -23,7 +23,7 @@ from livekit.plugins import (
 
 import config
 import db
-from tools import caller_words, rules
+from tools import caller_words, dates, rules
 from tools.collection_tools import (
     AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
 )
@@ -103,12 +103,36 @@ class Collector(Agent):
         text = new_message.text_content or ""
         self.call.heard(text)
         self.silences = 0
+        agreed = self.call.caller_agreed_to(self._last_agent_text(), text)
+        if agreed:
+            logger.info("RULE promise_date_agreed: %s (link waits for record_promise_to_pay)", agreed)
         line, hang_up = self._fixed_reply(text)
         if line:
             # LiveKit drops a stopped turn's message; keep it so the transcript has it
             await self._keep_in_history(new_message)
             self._say(line, hang_up)
             raise StopResponse()
+        if (turn_ctx is not None and self.call.person_status is None
+                and caller_words.confirms_identity(text, self.call.first_name)):
+            # nano sometimes answers a "haan ji" without reporting it; the tool still checks
+            turn_ctx.add_message(role="system", content=(
+                f"The caller just confirmed they are {self.call.first_name}. "
+                "Call report_person with status customer now."))
+        today = self.call.clock().date()
+        days = dates.note_for(text, today)
+        if days and turn_ctx is not None:
+            logger.info("RULE weekday_resolved: %s", days)
+            turn_ctx.add_message(role="system", content=(
+                f"The caller named these days (IST): {days}. Use exactly these dates."))
+            promise = self.call.promise
+            new = [d for _, d in dates.days_named(text, today)]
+            if promise and promise["date"] not in new:
+                logger.info("RULE promise_date_change: caller named %s, promise is %s",
+                            new[-1], promise["date"])
+                turn_ctx.add_message(role="system", content=(
+                    f"The saved promise is {dates.say(promise['date'])}, but the caller named "
+                    f"{dates.say(new[-1])}. If they are changing the promise date, call "
+                    "record_promise_to_pay with the new date; it replaces the old one."))
         switched = self.language.observe(text)
         if not switched:
             if turn_language(text) not in (None, self.language.current):
@@ -135,7 +159,8 @@ class Collector(Agent):
             self.call.record_outcome("human_callback", "legal question")
             return caller_words.line(caller_words.LEGAL_LINE, lang), True
         if (self.call.promise_recorded and not self.call.link_sent_after_promise
-                and self._offered_link() and caller_words.declines(text)):
+                and self._offered_link() and caller_words.declines(text)
+                and not self._names_a_day(text)):  # "nahi, kal" changes the date, not the link
             logger.info("RULE promise_close: link declined after a promise (%r)", text[:60])
             self.call.record_outcome_or_better("promise_to_pay")
             return self._promise_close(caller_words.PROMISE_CLOSE_DECLINED), True
@@ -160,13 +185,38 @@ class Collector(Agent):
     def _dob_question(self):
         return self._line(caller_words.DOB_QUESTION, name=self.call.first_name)
 
-    def _offered_link(self):
-        """Was the agent's last message about the payment link?"""
+    def _names_a_day(self, text):
+        return bool(dates.days_named(text, self.call.clock().date())
+                    or caller_words.said_a_date([text]))
+
+    def _identity_question(self):
+        return self._line(caller_words.CONFIRM_IDENTITY, name=self.call.first_name)
+
+    def _step_line(self):
+        """What to say when a reply was only a repeated greeting: the current step again."""
+        call = self.call
+        if call.person_status is None:
+            return self._identity_question()
+        if call.person_status == "customer" and not call.unlocked:
+            return self._dob_question()
+        if call.unlocked and not call.promise_recorded and not call.store.links_sent_in_session(call.session_id):
+            due = call.get_due_details()
+            if "emi_amount" in due:
+                d = date.fromisoformat(due["due_date"])
+                return self._line(caller_words.DUE_QUESTION, amount=f"{due['emi_amount']:,}",
+                                  date=f"{d.day} {d:%B}")
+        return None  # the guard's usual fallback
+
+    def _last_agent_text(self):
         for item in reversed(self.chat_ctx.items):
             if item.type == "message" and item.role == "assistant":
-                text = (item.text_content or "").lower()
-                return "link" in text or "लिंक" in text
-        return False
+                return item.text_content or ""
+        return ""
+
+    def _offered_link(self):
+        """Was the agent's last message about the payment link?"""
+        text = self._last_agent_text().lower()
+        return "link" in text or "लिंक" in text
 
     def _say(self, line, hang_up=False):
         """Speak a fixed line from the code; hang_up ends the call after it plays."""
@@ -213,11 +263,14 @@ class Collector(Agent):
 
     async def llm_node(self, chat_ctx, tools, model_settings: ModelSettings):
         # Every reply passes through ReplyGuard before it is spoken or saved.
-        # A confirmed customer who still owes a DOB hears the DOB question, not "I'll try later"
-        needs_dob = self.call.person_status == "customer" and not self.call.unlocked
+        # "I'll try them later" is only for someone else. Before anyone is confirmed the
+        # fallback asks who it is; a customer who still owes a DOB is asked for it.
         guard = ReplyGuard(self.language.current, locked=not self.call.unlocked,
                            third_party=self.call.person_status == "third_party",
-                           locked_fallback=self._dob_question() if needs_dob else None)
+                           locked_fallback=(None if self.call.person_status == "third_party"
+                                            else self._step_line()),
+                           greeted=True,  # the code spoke the greeting before any AI turn
+                           step_fallback=self._step_line())
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             if isinstance(chunk, str):
                 text = guard.feed(chunk)
@@ -261,6 +314,9 @@ class Collector(Agent):
                 their answer, don't call this yet. Ask once more first.
         """
         result = self._run("report_person", self.call.report_person, status)
+        if result.get("next") == "confirm_identity_again":
+            self._say(self._identity_question())
+            raise StopResponse()
         if result.get("next") == "ask_date_of_birth":
             logger.info("RULE dob_question: spoken by code after report_person")
             self._say(self._dob_question())
@@ -310,12 +366,15 @@ class Collector(Agent):
             channel: "sms" or "whatsapp", whichever the customer prefers.
         """
         result = self._run("send_payment_link", self.call.send_payment_link, channel)
+        self._close_if_sent_after_promise(result)
+        return result
+
+    def _close_if_sent_after_promise(self, result):
         if result.get("sent") and self.call.promise_recorded:
             logger.info("RULE promise_close: link sent after a promise, ending the call")
             self.call.record_outcome_or_better("promise_to_pay")
             self._say(self._promise_close(caller_words.PROMISE_CLOSE_SENT), hang_up=True)
             raise StopResponse()
-        return result
 
     @function_tool()
     async def check_payment_status(self, context: RunContext) -> dict:
@@ -332,7 +391,15 @@ class Collector(Agent):
             month: Month number, 1 to 12.
             year: Full four-digit year, for example 2026.
         """
-        return self._run("record_promise_to_pay", self.call.record_promise_to_pay, day, month, year)
+        result = self._run("record_promise_to_pay", self.call.record_promise_to_pay, day, month, year)
+        if result.get("saved") and self.call.link_waiting:
+            # the caller asked for the link before the promise was saved; send it now
+            self.call.link_waiting = False
+            logger.info("RULE link_after_promise: sending the link the caller asked for")
+            sent = self._run("send_payment_link", self.call.send_payment_link,
+                             caller_words.named_channel(self.call.caller_lines))
+            self._close_if_sent_after_promise(sent)
+        return result
 
     @function_tool()
     async def schedule_callback(self, context: RunContext, day: int, month: int, year: int,
@@ -390,8 +457,8 @@ def call_note(call, customer, kind, today):
             f"EMI amount due: ₹{loan['emi_amount']:,}\n"
             f"EMI was due on: {due.day} {due:%B}\n"
             f"Next 7 days: {upcoming}\n"
-            "If the customer names a weekday, take its date from 'Next 7 days' and confirm it. "
-            "Don't ask them for the date.\n"
+            "When the customer names a day (a weekday, aaj, kal, parson), the code adds its "
+            "date to that turn. Use that date and confirm it; don't work it out yourself.\n"
             "Write every amount and date in digits exactly as shown here, like ₹2,200 and "
             "30 October. Never write numbers as words. Never invent or round a number. "
             "Never say the year.\n")

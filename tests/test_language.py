@@ -55,6 +55,19 @@ def test_hinglish_in_roman_letters_counts_as_hindi():
     assert turn_language("I'll pay on Friday, main reason is salary") == "en"
 
 
+@pytest.mark.parametrize("text", ["agle hafte kisi din", "6 November ke aas paas", "kal tak kar dungi",
+                                  "Friday ko de dungi", "salary aane ke baad"])
+def test_more_hinglish_stays_hindi(text):
+    # "agle hafte kisi din" switched a real nano call to English
+    t = LanguageTracker("hi")
+    assert t.observe(text) is None and t.current == "hi"
+
+
+def test_english_with_common_words_still_switches():
+    t = LanguageTracker("hi")
+    assert t.observe("I will pay it next week") == "en"
+
+
 def test_hinglish_does_not_switch_a_hindi_call_to_english():
     t = LanguageTracker("hi")
     assert t.observe("Okay") is None

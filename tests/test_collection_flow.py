@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 
+from tests.helpers import confirmed
 from tools import policy
 from tools.collection_tools import Call
 from tools.rules import IST
@@ -27,7 +28,7 @@ def make_call(store, cid="C002"):
 
 def unlocked_call(store, cid="C002", says="SMS pe bhej dijiye"):
     c = make_call(store, cid)
-    c.report_person("customer")
+    confirmed(c)
     c.heard(says)
     return c
 

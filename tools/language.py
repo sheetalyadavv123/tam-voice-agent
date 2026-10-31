@@ -18,7 +18,8 @@ HINGLISH = re.compile(
     r"\b(?:hai|hain|kya|kyun|kyon|nahi|nahin|haan|ji|bhej|bhejo|karo|kariye|kijiye|dijiye"
     r"|hoon|hun|theek|thik|accha|achha|acha|baje|shaam|subah|hoga|hogi|bata|batao|mera"
     r"|meri|mujhe|aap|aapka|aapki|pe|kal|aaj|bhi|wala|wali|abhi|paisa|paise|dunga|dungi"
-    r"|karungi|karunga|kaam|baat)\b",
+    r"|karungi|karunga|kaam|baat|agle|agla|agli|hafte|hafta|kisi|din|ke|ka|ki|ko|se|mein"
+    r"|aas|paas|kar|karna|dena|diya|liya|raha|rahi|tha|thi|tak|baad|pehle|parson|aaj)\b",
     re.I)
 MIN_WORDS = 3
 FILLER = {"okay", "ok", "yes", "no", "haan", "hmm", "bro", "thanks", "thank", "you", "hello"}
