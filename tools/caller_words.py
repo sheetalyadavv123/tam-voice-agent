@@ -61,6 +61,16 @@ DECLINE = re.compile(
     re.I)
 DECLINE_MAX_WORDS = 6
 _EDGE_L, _EDGE_R = r"(?<![A-Za-zऀ-ॿ])", r"(?![A-Za-zऀ-ॿ])"
+# The customer offering to pay in their own words, e.g. after reporting hardship:
+# "salary aane pe de dungi", "link bhej do, main pay kar dungi", "I can pay something"
+OFFERS_TO_PAY = re.compile(
+    r"\b(?:(?:pay|payment|bhugtan)\s+kar\s+(?:d(?:u|oo)ng[ia]|deti|deta|dete|sakti|sakta|sakte)"
+    r"|(?:de|bhar)\s+d(?:u|oo)ng[ia]|de\s+sak(?:ti|ta|te)|kuch\s+de\s+sak"
+    r"|i'?ll\s+pay|i\s+will\s+pay|i\s+can\s+pay|let\s+me\s+pay|send\s+(?:me\s+)?the\s+link"
+    r"|link\s+bhej)\b"
+    r"|(?:pay|payment|भुगतान)\s+कर\s+(?:दूँग|दूंग|देत|सकत)|(?:दे|भर)\s+(?:दूँग|दूंग)|दे\s+सकत"
+    r"|(?:link|लिंक)\s+भेज",
+    re.I)
 # "Am I speaking with Sunita?" -> "haan ji" / "yes" / "ji, boliye". A bare "okay" is not a yes.
 YES_FIRST = re.compile(
     r"^\W*(?:haan|haa|han|ha|haanji|ji|jee|yes|yeah|yep|yup|हाँ|हां|हा|जी)" + _EDGE_R, re.I)
@@ -128,6 +138,11 @@ def confirms_identity(text, first_name):
     return bool(YES_FIRST.search(text) or I_AM.search(text) or named)
 
 
+def offers_to_pay(lines):
+    """Did the caller offer to pay, in their last RECENT messages?"""
+    return said_recently(lines, OFFERS_TO_PAY) is not None
+
+
 def agrees(text):
     """A yes to what the agent just read back ("हाँ, सही है", "okay"), not a "no"."""
     return bool(AGREE.search(text)) and not DECLINE.search(text)
@@ -168,6 +183,15 @@ PROMISE_CLOSE_SENT = {
 PROMISE_CLOSE_DECLINED = {
     "hi": "ठीक है {name} जी। ₹{amount} का payment {date} तक कर दीजिए। धन्यवाद, आपका दिन शुभ हो।",
     "en": "All right, {name}. Please pay ₹{amount} by {date}. Thank you, have a good day.",
+}
+CALLBACK_TIME_QUESTION = {
+    "hi": "हमारी सहयोगी आपको किस दिन और किस समय कॉल करें?",
+    "en": "What day and time would suit you for a call from our colleague?",
+}
+# {when} like "Monday 2 November, दोपहर 12 बजे" / "Monday 2 November at 12 pm"
+HANDOFF_CLOSE = {
+    "hi": "ठीक है {name} जी, हमारी सहयोगी आपको {when} कॉल करेंगी। धन्यवाद, अपना ध्यान रखिए।",
+    "en": "All right, {name}. Our colleague will call you on {when}. Thank you, take care.",
 }
 CONFIRM_IDENTITY = {
     "hi": "क्या मेरी बात {name} जी से हो रही है?",

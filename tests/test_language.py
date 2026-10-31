@@ -19,10 +19,39 @@ def test_short_or_filler_replies_keep_hindi(text):
     assert t.current == "hi"
 
 
-def test_a_full_english_sentence_switches_to_english():
+def test_two_english_sentences_in_a_row_switch_to_english():
     t = LanguageTracker("hi")
-    assert t.observe("I'll pay it on Friday") == "en"
+    assert t.observe("I'll pay it on Friday") is None  # one is not enough
+    assert t.current == "hi"
+    assert t.observe("I get my salary that day") == "en"
     assert t.current == "en"
+
+
+def test_a_short_reply_in_between_breaks_the_run():
+    t = LanguageTracker("hi")
+    t.observe("I'll pay it on Friday")
+    t.observe("Okay")
+    assert t.observe("I get my salary that day") is None and t.current == "hi"
+
+
+def test_a_hindi_sentence_in_between_breaks_the_run():
+    t = LanguageTracker("hi")
+    t.observe("I'll pay it on Friday")
+    t.observe("हाँ, शुक्रवार तक कर दूंगी")
+    assert t.observe("I get my salary that day") is None and t.current == "hi"
+
+
+def test_i_think_next_monday_stays_hindi():
+    t = LanguageTracker("hi")
+    for _ in range(3):
+        assert t.observe("I think next Monday") is None
+    assert t.current == "hi"
+
+
+@pytest.mark.parametrize("text", ["I think next Monday", "maybe twelve", "kal subah", "around twelve tomorrow",
+                                  "next Monday morning at ten", "Friday evening"])
+def test_time_and_day_phrases_never_count(text):
+    assert switch_language(text) is None
 
 
 def test_short_hindi_reply_stays_hindi():
@@ -37,9 +66,10 @@ def test_short_hindi_reply_does_not_switch_english_back():
     assert t.current == "en"
 
 
-def test_full_hindi_sentence_switches_back():
+def test_two_hindi_sentences_switch_back():
     t = LanguageTracker("en")
-    assert t.observe("शुक्रवार तक कर दूंगी") == "hi"
+    assert t.observe("मैं पूरा कर दूंगी") is None
+    assert t.observe("अभी थोड़ा समय चाहिए") == "hi"
 
 
 def test_mostly_latin_means_more_than_half_the_words():
@@ -63,9 +93,8 @@ def test_more_hinglish_stays_hindi(text):
     assert t.observe(text) is None and t.current == "hi"
 
 
-def test_english_with_common_words_still_switches():
-    t = LanguageTracker("hi")
-    assert t.observe("I will pay it next week") == "en"
+def test_english_with_common_words_still_counts():
+    assert switch_language("I will pay it next week") == "en"  # "I will pay it" is left
 
 
 def test_hinglish_does_not_switch_a_hindi_call_to_english():

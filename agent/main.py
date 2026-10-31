@@ -193,8 +193,11 @@ class Collector(Agent):
         return self._line(caller_words.CONFIRM_IDENTITY, name=self.call.first_name)
 
     def _step_line(self):
-        """What to say when a reply was only a repeated greeting: the current step again."""
+        """What to say when the guard emptied a reply (a repeated greeting, a payment ask
+        after hardship): the current step again."""
         call = self.call
+        if call.push_stopped:
+            return None if call.callback_confirmed else self._line(caller_words.CALLBACK_TIME_QUESTION)
         if call.person_status is None:
             return self._identity_question()
         if call.person_status == "customer" and not call.unlocked:
@@ -270,7 +273,8 @@ class Collector(Agent):
                            locked_fallback=(None if self.call.person_status == "third_party"
                                             else self._step_line()),
                            greeted=True,  # the code spoke the greeting before any AI turn
-                           step_fallback=self._step_line())
+                           step_fallback=self._step_line(),
+                           no_push=bool(self.call.push_stopped))
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             if isinstance(chunk, str):
                 text = guard.feed(chunk)
@@ -415,8 +419,15 @@ class Collector(Agent):
             reason: "customer_unavailable" if someone else answered or the customer was away;
                 "customer_requested" if the customer asked to be called later.
         """
-        return self._run("schedule_callback", self.call.schedule_callback,
-                         day, month, year, hour, minute, reason)
+        result = self._run("schedule_callback", self.call.schedule_callback,
+                           day, month, year, hour, minute, reason)
+        if result.get("saved") and self.call.push_stopped:
+            logger.info("RULE handoff_close: colleague callback at %s, ending the call", result["when"])
+            when = datetime.fromisoformat(result["when"])
+            self._say(self._line(caller_words.HANDOFF_CLOSE, name=self.call.first_name,
+                                 when=say_when(when, self.language.current)), hang_up=True)
+            raise StopResponse()
+        return result
 
     @function_tool()
     async def record_outcome(self, context: RunContext, outcome: Outcome, note: str = "") -> dict:
@@ -439,6 +450,17 @@ class Collector(Agent):
                 customer_asked_for_person are accepted.
         """
         return self._run("transfer_to_human", self.call.transfer_to_human, reason)
+
+
+def say_when(when, language):
+    """"Monday 2 November, दोपहर 12 बजे" or "Monday 2 November at 12 pm"."""
+    clock = f"{when.hour % 12 or 12}" + (f":{when.minute:02d}" if when.minute else "")
+    day = f"{when:%A} {when.day} {when:%B}"
+    if language == "hi":
+        part = ("सुबह" if when.hour < 12 else "दोपहर" if when.hour < 16
+                else "शाम" if when.hour < 20 else "रात")
+        return f"{day}, {part} {clock} बजे"
+    return f"{day} at {clock} {'am' if when.hour < 12 else 'pm'}"
 
 
 def call_note(call, customer, kind, today):

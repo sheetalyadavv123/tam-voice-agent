@@ -25,6 +25,8 @@ runs each reply through clean_sentence before it reaches the voice.
 - After the code's greeting, a sentence that greets again ("नमस्ते ... AI असिस्टेंट
   बोल रही हूँ") is dropped. If nothing is left, the agent carries on with the step
   the call is at (step_fallback).
+- After hardship or a dispute (no_push), a sentence asking when or whether the
+  customer will pay, or offering the link again, is dropped.
 - A reply is cut to MAX_SENTENCES.
 """
 import re
@@ -112,6 +114,21 @@ INTRO = re.compile(
     r"नमस्ते|नमस्कार|\bhello\b|\bhi\b|बोल\s+रही|\bspeaking\b|\bcalling\b", re.I)
 BARE_GREETING = re.compile(
     r"^\W*(?:नमस्ते|नमस्कार|hello|hi)(?:[\s,]+[\wऀ-ॿ]+){0,2}[\s,]*(?:जी|ji)?\W*$", re.I)
+
+
+# After hardship or a dispute: "आप कब pay कर पाएंगे?", "when can you pay?", or another
+# offer of the link. Saying the amount when asked ("आपकी EMI ₹2,200 है") is kept.
+PAY_ASK = re.compile(
+    r"कब\s*(?:तक\s*)?(?:[ऀ-ॿ]+\s+)?(?:pay|payment|भुगतान|भर|दे\s+(?:पा|सक))"
+    r"|(?:pay|payment|भुगतान|भर)\s*(?:कर\s*)?(?:पा(?:एं|एँ|ए|ओ)|सक(?:ें|ेंगे|ते|ती)|करेंगे|करेंगी)"
+    r"|\bkab\s*(?:tak\s*)?pay\b|\bpay\s+kar\s+pa"
+    r"|\bwhen\s+(?:can|will|could|would)\s+you\b[^.?!]*\b(?:pay|payment)"
+    r"|\b(?:can|will|could|would)\s+you\s+(?:be\s+able\s+to\s+)?(?:pay|make\s+(?:the|a)\s+payment)"
+    r"|\bable\s+to\s+pay\b|\bdate\s+to\s+pay\b|\bpromise\s+(?:date|to\s+pay)\b"
+    r"|(?:link|लिंक)\s*भेज\s*(?:दूँ|दूं|दें)|\bsend\s+you\s+(?:the|a)\s+(?:payment\s+)?link\b",
+    re.I)
+# Drops that the "carry on with the current step" fallback may replace
+STEP_DROPS = {"rewritten", "repeat_greeting", "pay_push"}
 
 
 def repeats_greeting(sentence: str) -> bool:
@@ -294,7 +311,7 @@ class ReplyGuard:
 
     def __init__(self, language: str, locked: bool = False, third_party: bool = False,
                  locked_fallback: str | None = None, greeted: bool = False,
-                 step_fallback: str | None = None):
+                 step_fallback: str | None = None, no_push: bool = False):
         self.language = language
         self.locked = locked
         self.third_party = third_party
@@ -304,6 +321,7 @@ class ReplyGuard:
         # left, step_fallback carries on with the current step instead
         self.greeted = greeted
         self.step_fallback = step_fallback
+        self.no_push = no_push  # hardship or dispute: never ask for payment again
         self.said_try_again = False
         self.buffer = ""
         self.spoken = 0
@@ -320,7 +338,7 @@ class ReplyGuard:
         out = self._check(rest) if rest.strip() else ""
         if self.spoken == 0 and any(e[0] != "rewritten" for e in self.events):
             self.spoken += 1
-            only_greeting = all(e[0] in ("rewritten", "repeat_greeting") for e in self.events)
+            only_greeting = all(e[0] in STEP_DROPS for e in self.events)
             if only_greeting and self.step_fallback:
                 self.events.append(("step_fallback", self.step_fallback))
                 return self.step_fallback
@@ -337,6 +355,9 @@ class ReplyGuard:
             return ""
         if self.greeted and repeats_greeting(sentence):
             self.events.append(("repeat_greeting", sentence))
+            return ""
+        if self.no_push and PAY_ASK.search(sentence):
+            self.events.append(("pay_push", sentence))
             return ""
         if self.third_party and COLLEAGUE.search(sentence):
             self.events.append(("colleague_for_third_party", sentence))

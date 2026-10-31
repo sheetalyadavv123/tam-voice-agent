@@ -332,3 +332,37 @@ def test_without_a_step_line_the_usual_fallback_is_used():
     g = ReplyGuard("hi", greeted=True)
     g.feed("नमस्ते Sunita जी। ")
     assert g.finish() == FALLBACK["hi"]
+
+
+# ---- batch 4: no payment asks after hardship or a dispute ----
+
+@pytest.mark.parametrize("sentence", [
+    "आप इसे कब pay कर पाएंगे?", "आप कब तक pay कर सकेंगे?", "क्या आप अगले हफ्ते pay कर पाएंगे?",
+    "क्या आप भर पाएँगी?", "क्या मैं payment link भेज दूँ?", "When can you pay the EMI?",
+    "Will you be able to pay by Friday?", "Could you make the payment this week?",
+    "Can I send you the payment link?", "aap kab tak pay kar paoge?",
+])
+def test_payment_asks_dropped_after_hardship(sentence):
+    g = ReplyGuard("hi", no_push=True)
+    assert g.feed(sentence + " ") == ""
+    assert g.events[0][0] == "pay_push"
+
+
+@pytest.mark.parametrize("sentence", [
+    "आपकी EMI ₹2,200 है, जो 10 September को due थी।",
+    "हमारी सहयोगी आपसे बात करेंगी।",
+    "I understand, that sounds hard.",
+    "Your EMI is ₹2,200.",
+])
+def test_amount_and_kind_words_are_kept_after_hardship(sentence):
+    assert ReplyGuard("hi", no_push=True).feed(sentence + " ") == sentence + " "
+
+
+def test_payment_asks_kept_before_hardship():
+    assert ReplyGuard("hi").feed("आप इसे कब pay कर पाएंगे? ") == "आप इसे कब pay कर पाएंगे? "
+
+
+def test_only_a_payment_ask_falls_back_to_the_step():
+    g = ReplyGuard("hi", no_push=True, step_fallback="WHEN CAN A COLLEAGUE CALL?")
+    g.feed("आप इसे कब pay कर पाएंगे? ")
+    assert g.finish() == "WHEN CAN A COLLEAGUE CALL?"
