@@ -545,3 +545,49 @@ def test_a_clear_yes_before_identity_tells_the_ai_to_report_it():
     assert turn_with_ctx(agent, "हाँ जी, बोलिए") == [
         "The caller just confirmed they are Sunita. Call report_person with status customer now."]
     assert turn_with_ctx(agent, "Okay") == []
+
+
+# ---- batch 4 ----
+
+def hardship_handed_over(agent, call):
+    confirmed(call)
+    call.heard("job chali gayi, abhi paise nahi hain")
+    assert run_tool(agent, agent.transfer_to_human(None, "hardship"))["requested"] is True
+
+
+def test_after_hardship_the_guard_drops_pay_asks_and_asks_for_a_time(monkeypatch):
+    agent, call, store, session = make_agent()
+    hardship_handed_over(agent, call)
+    assert reply_to(agent, monkeypatch, "मैं समझ सकती हूँ। आप इसे कब pay कर पाएंगे?") == "मैं समझ सकती हूँ। "
+    assert reply_to(agent, monkeypatch, "आप इसे कब pay कर पाएंगे?") == \
+        "हमारी सहयोगी आपको किस दिन और किस समय कॉल करें?"
+
+
+def test_callback_time_after_hardship_closes_the_call(caplog):
+    agent, call, store, session = make_agent()
+    hardship_handed_over(agent, call)
+    call.heard("Monday 12 baje")
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert run_tool(agent, agent.schedule_callback(None, 2, 11, 2026, 12, 0, "customer_requested")) == "stopped"
+    assert session.said == ["ठीक है Sunita जी, हमारी सहयोगी आपको Monday 2 November, दोपहर 12 बजे कॉल करेंगी। "
+                            "धन्यवाद, अपना ध्यान रखिए।"]
+    assert session.closed is True and len(store.callbacks_due(FAR)) == 1
+    assert "RULE handoff_close" in caplog.text and "RULE one_callback_per_handoff" in caplog.text
+
+
+def test_english_handoff_close():
+    agent, call, store, session = make_agent()
+    agent.language.current = "en"
+    hardship_handed_over(agent, call)
+    call.heard("Tuesday 4:30 pm")
+    run_tool(agent, agent.schedule_callback(None, 3, 11, 2026, 16, 30, "customer_requested"))
+    assert session.said == ["All right, Sunita. Our colleague will call you on Tuesday 3 November at 4:30 pm. "
+                            "Thank you, take care."]
+
+
+def test_callback_without_hardship_goes_back_to_the_ai():
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    call.heard("kal 4 baje call karna")
+    r = run_tool(agent, agent.schedule_callback(None, 29, 10, 2026, 16, 0, "customer_requested"))
+    assert r["saved"] is True and session.said == [] and session.closed is False

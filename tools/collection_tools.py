@@ -26,6 +26,8 @@ HANDOFF_REASONS = {
 }
 # After a promise the payment push is over; only these still reach a colleague.
 HANDOFF_AFTER_PROMISE = {"legal_question", "hardship", "dispute", "customer_asked_for_person"}
+# After one of these the payment push is over: a colleague takes it from here.
+STOP_PUSH = {"hardship", "dispute"}
 
 PersonStatus = Literal["customer", "third_party", "unavailable"]
 Channel = Literal["sms", "whatsapp"]
@@ -75,6 +77,9 @@ class Call:
         # promise is saved, no link goes out; the link they asked for waits here.
         self.read_back_date = None
         self.link_waiting = False
+        # "hardship" or "dispute" once the customer reported one: no more asking for payment
+        self.push_stopped = None
+        self.callback_confirmed = None  # the time the colleague will call, once agreed
 
     def heard(self, text):
         """The agent passes every finished caller message here."""
@@ -234,6 +239,9 @@ class Call:
         loan = self._customer["loan"]
         if loan["status"] == "closed" or loan["emi_amount"] <= 0:
             return {"sent": False, "reason": "no_payment_due"}
+        refused = self._push_refused()
+        if refused:
+            return {"sent": False, **refused}
         # Only send when the caller named a channel; "okay" or "haan" is not enough.
         named = caller_words.named_channel(self.caller_lines)
         if self.read_back_date:  # an agreed date that is not the saved promise (yet)
@@ -302,6 +310,12 @@ class Call:
             return {"status": "pending", "next": nxt}
         return {"status": "none", "next": "ask_when_they_can_pay"}
 
+    def _push_refused(self):
+        """After hardship or a dispute, payment only goes ahead if the customer offers it."""
+        if not self.push_stopped or caller_words.offers_to_pay(self.caller_lines):
+            return None
+        return {"reason": "payment_push_stopped", "next": "do_not_ask_for_payment_ask_callback_time"}
+
     # ---- tool: promise to pay ----
     def record_promise_to_pay(self, day, month, year):
         if not self.unlocked:
@@ -309,6 +323,9 @@ class Call:
         loan = self._customer["loan"]
         if loan["status"] == "closed" or loan["emi_amount"] <= 0:
             return {"saved": False, "reason": "no_payment_due"}
+        refused = self._push_refused()
+        if refused:
+            return {"saved": False, **refused}
         check = rules.validate_promise_date(day, month, year, today=self.clock().date())
         self.read_back_date = None  # saved or not, the link no longer waits on it
         if not check["ok"]:
@@ -350,10 +367,17 @@ class Call:
         check = rules.validate_callback_time(due, self.clock())
         if not check["ok"]:
             return {"saved": False, "reason": check["reason"], "next": "suggest_a_time_in_calling_hours"}
+        if self.handoff_callback_id is not None:
+            # transfer_to_human already booked a colleague: move that call, don't add another
+            self.store.set_callback_due(self.handoff_callback_id, due)
+            self.callback_confirmed = due
+            logger.info("RULE one_callback_per_handoff: colleague callback moved to %s", due.isoformat())
+            return {"saved": True, "when": due.isoformat(), "updated": "colleague_callback"}
         if self.callback_id is not None:  # a new time replaces the old one
             self.store.set_callback_status(self.callback_id, "cancelled")
         cb = self.store.add_callback(self.customer_id, due, reason, self.session_id)
         self.callback_id = cb["id"]
+        self.callback_confirmed = due
         return {"saved": True, "when": due.isoformat()}
 
     # ---- tool: how did the call end? ----
@@ -378,6 +402,8 @@ class Call:
         if self.person_status == "third_party" and outcome in ("not_available", "callback_requested"):
             return {"saved": False, "error": "someone_else_answered", "use": "third_party"}
         self.outcome = outcome
+        if outcome in STOP_PUSH:
+            self._stop_push(outcome)
         self.note = (note or "")[:200]
         return {"saved": True}
 
@@ -434,5 +460,14 @@ class Call:
             self.outcome = "human_callback"
         if not self.note:
             self.note = (reason or "")[:200]
+        if reason in STOP_PUSH:
+            self._stop_push(reason)
+            return {"requested": True,
+                    "next": "say_a_colleague_will_call_and_ask_what_day_and_time_suits_them"}
         return {"requested": True,
                 "next": "tell_caller_a_colleague_will_call_back_do_not_say_connecting_now"}
+
+    def _stop_push(self, reason):
+        if self.push_stopped is None:
+            logger.info("RULE payment_push_stopped: %s, no more asking for payment", reason)
+        self.push_stopped = self.push_stopped or reason

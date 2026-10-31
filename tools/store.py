@@ -163,3 +163,12 @@ class MemoryStore:
                 c["status"] = status
                 return dict(c)
         return None
+
+    def set_callback_due(self, callback_id, due_at):
+        """Move a callback made in this call to a new time. (A callback loaded from the
+        database keeps its saved time: PostgresStore only saves status changes.)"""
+        for c in self._callbacks:
+            if c["id"] == callback_id:
+                c["due_at"] = due_at
+                return dict(c)
+        return None

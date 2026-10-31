@@ -517,3 +517,82 @@ def test_agreeing_to_the_saved_promise_date_changes_nothing(store):
     assert c.caller_agreed_to("तो 30 October, सही?", "haan, SMS pe") is None
     c.heard("haan, SMS pe")
     assert c.send_payment_link("sms")["sent"] is True
+
+
+# ---- batch 4: hardship or a dispute ends the payment push ----
+
+def after_handoff(store, reason="hardship"):
+    c = make_call(store, "C002")
+    confirmed(c)
+    c.heard("job chali gayi hai, abhi paise nahi hain")
+    assert c.transfer_to_human(reason)["next"] == "say_a_colleague_will_call_and_ask_what_day_and_time_suits_them"
+    return c
+
+
+@pytest.mark.parametrize("reason", ["hardship", "dispute"])
+def test_link_and_promise_refused_after_hardship_or_dispute(store, reason):
+    c = after_handoff(store, reason)
+    c.heard("haan SMS pe")
+    assert c.send_payment_link("sms") == {"sent": False, "reason": "payment_push_stopped",
+                                          "next": "do_not_ask_for_payment_ask_callback_time"}
+    assert c.record_promise_to_pay(30, 10, 2026)["reason"] == "payment_push_stopped"
+    assert store.latest_link("C002") is None and c.promise_recorded is False
+
+
+@pytest.mark.parametrize("offer", ["salary aane pe Friday ko de dungi", "link bhej do, main pay kar dungi",
+                                   "मैं शुक्रवार को दे दूँगी", "I can pay something on Friday"])
+def test_customer_can_still_offer_to_pay(store, offer):
+    c = after_handoff(store)
+    c.heard(offer)
+    assert c.record_promise_to_pay(30, 10, 2026)["saved"] is True
+
+
+def test_amount_is_still_given_after_hardship(store):
+    c = after_handoff(store)
+    assert c.get_due_details()["emi_amount"] == 2200
+
+
+def test_hardship_outcome_also_stops_the_push(store):
+    c = make_call(store, "C002")
+    confirmed(c)
+    c.record_outcome("hardship")
+    c.heard("SMS")
+    assert c.send_payment_link("sms")["reason"] == "payment_push_stopped"
+
+
+def test_other_handoffs_keep_the_push(store):
+    c = make_call(store, "C002")
+    confirmed(c)
+    c.transfer_to_human("info_not_available")
+    c.heard("SMS")
+    assert c.send_payment_link("sms")["sent"] is True
+
+
+# ---- batch 4: one callback per handoff ----
+
+def test_hardship_then_a_time_leaves_one_callback_at_that_time(store):
+    c = after_handoff(store)
+    c.heard("Monday 12 baje")
+    r = c.schedule_callback(2, 11, 2026, 12, 0, "customer_requested")
+    assert r == {"saved": True, "when": "2026-11-02T12:00:00+05:30", "updated": "colleague_callback"}
+    open_cbs = store.callbacks_due(FAR)
+    assert len(open_cbs) == 1
+    assert open_cbs[0]["due_at"] == datetime(2026, 11, 2, 12, 0, tzinfo=IST)
+    assert open_cbs[0]["reason"] == "human_followup"
+
+
+def test_a_second_time_moves_the_same_callback(store):
+    c = after_handoff(store)
+    c.heard("Monday 12 baje")
+    c.schedule_callback(2, 11, 2026, 12, 0, "customer_requested")
+    c.heard("nahi, Tuesday 4 baje")
+    c.schedule_callback(3, 11, 2026, 16, 0, "customer_requested")
+    assert [cb["due_at"].hour for cb in store.callbacks_due(FAR)] == [16]
+
+
+def test_callback_without_a_handoff_is_its_own(store):
+    c = make_call(store, "C002")
+    confirmed(c)
+    c.heard("kal 4 baje")
+    assert "updated" not in c.schedule_callback(29, 10, 2026, 16, 0, "customer_requested")
+    assert len(store.callbacks_due(FAR)) == 1
