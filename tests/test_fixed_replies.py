@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "agent"))
 import main  # noqa: E402
 from livekit.agents import StopResponse, llm  # noqa: E402
 
+from tests.helpers import confirmed  # noqa: E402
 from tools import caller_words, policy  # noqa: E402
 from tools.collection_tools import Call  # noqa: E402
 from tools.rules import IST  # noqa: E402
@@ -81,7 +82,7 @@ def hear(agent, text):
 
 def test_legal_question_hands_over_and_ends_the_call(caplog):
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     with caplog.at_level(logging.WARNING, logger="tam-voice-agent"):
         assert hear(agent, "case hoga kya?") is True
     assert "RULE legal_handoff" in caplog.text
@@ -93,7 +94,7 @@ def test_legal_question_hands_over_and_ends_the_call(caplog):
 
 def test_legal_question_keeps_one_callback_even_after_an_earlier_handover():
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     call.transfer_to_human("hardship")
     hear(agent, "court jaana padega kya?")
     assert len(store.callbacks_due(FAR)) == 1
@@ -107,9 +108,9 @@ def test_legal_words_before_identity_do_not_hand_over():
 
 def test_ordinary_answer_goes_to_the_ai():
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     assert hear(agent, "शुक्रवार को दे दूँगी") is False
-    assert session.said == [] and call.caller_lines == ["शुक्रवार को दे दूँगी"]
+    assert session.said == [] and call.caller_lines[-1] == "शुक्रवार को दे दूँगी"
 
 
 # ---- step 4a: third parties get the fixed line ----
@@ -140,7 +141,7 @@ def test_unknown_person_asking_why_goes_to_the_ai():
 
 def test_stopped_turn_still_lands_in_the_transcript():
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     hear(agent, "case hoga kya?")
     assert [m.text_content for m in session.history] == ["case hoga kya?"]
     assert agent.chat_ctx.items[-1].text_content == "case hoga kya?"
@@ -187,7 +188,7 @@ def away(agent, state="away"):
 
 
 def promise_made(call):
-    call.report_person("customer")
+    confirmed(call)
     assert call.record_promise_to_pay(30, 10, 2026)["saved"] is True
 
 
@@ -211,7 +212,7 @@ def test_link_after_a_promise_closes_the_call_with_a_fixed_line(caplog):
 
 def test_link_without_a_promise_goes_back_to_the_ai():
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     call.heard("SMS")
     assert run_tool(agent, agent.send_payment_link(None, "sms"))["sent"] is True
     assert session.said == [] and session.closed is False
@@ -265,6 +266,7 @@ def test_handover_after_a_promise_is_refused_through_the_agent(caplog):
 def test_dob_question_is_spoken_by_code(monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     agent, call, store, session = make_agent()
+    call.heard("haan ji")
     assert run_tool(agent, agent.report_person(None, "customer")) == "stopped"
     assert session.said == [DOB_HI] and session.closed is False
 
@@ -272,7 +274,7 @@ def test_dob_question_is_spoken_by_code(monkeypatch):
 def test_dob_question_when_the_caller_has_not_said_a_date(monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     call.heard("haan bolo")
     assert run_tool(agent, agent.verify_identity(None, 2, 11, 1985)) == "stopped"
     assert session.said == [DOB_HI] and call.dob_attempts == 0
@@ -281,7 +283,7 @@ def test_dob_question_when_the_caller_has_not_said_a_date(monkeypatch):
 def test_impossible_date_is_asked_again_by_code(monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     call.heard("31 February 1985")
     assert run_tool(agent, agent.verify_identity(None, 31, 2, 1985)) == "stopped"
     assert session.said == [caller_words.line(caller_words.DOB_RETRY, "hi", name="Sunita")]
@@ -290,7 +292,7 @@ def test_impossible_date_is_asked_again_by_code(monkeypatch):
 def test_right_dob_goes_back_to_the_ai_with_the_reminder(monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     call.heard("2 November 1985")
     r = run_tool(agent, agent.verify_identity(None, 2, 11, 1985))
     assert r["verified"] is True and r["next"] == "give_reminder" and session.said == []
@@ -299,7 +301,7 @@ def test_right_dob_goes_back_to_the_ai_with_the_reminder(monkeypatch):
 def test_guard_drop_for_a_customer_owing_a_dob_gives_the_dob_question(monkeypatch):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
 
     async def leaky(self, chat_ctx, tools, model_settings):
         yield "आपकी EMI ₹2,200 की है।"
@@ -313,7 +315,7 @@ def test_guard_drop_for_a_customer_owing_a_dob_gives_the_dob_question(monkeypatc
 def test_too_many_wrong_dobs_close_the_call(monkeypatch, caplog):
     monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
     agent, call, store, session = make_agent()
-    call.report_person("customer")
+    confirmed(call)
     results = []
     with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
         for _ in range(policy.MAX_DOB_ATTEMPTS):
@@ -388,3 +390,158 @@ def test_silence_after_a_promise_keeps_the_promise_outcome():
     away(agent)
     away(agent)
     assert call.outcome == "promise_to_pay"
+
+
+# ---- batch 3 ----
+
+def reply_to(agent, monkeypatch, text):
+    """What the guard lets through when the AI writes `text`."""
+    async def ai(self, chat_ctx, tools, model_settings):
+        yield text
+    monkeypatch.setattr(main.Agent.default, "llm_node", ai)
+
+    async def go():
+        return "".join([c async for c in agent.llm_node(None, [], None) if isinstance(c, str)])
+    return asyncio.run(go())
+
+
+GREETING_AGAIN = "नमस्ते Sunita जी, मैं Tam Infosoft की AI असिस्टेंट बोल रही हूँ।"
+
+
+def test_bare_okay_gets_the_short_identity_question(caplog):
+    agent, call, store, session = make_agent()
+    call.heard("Okay")
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert run_tool(agent, agent.report_person(None, "customer")) == "stopped"
+    assert session.said == ["क्या मेरी बात Sunita जी से हो रही है?"]
+    assert call.unlocked is False and "RULE identity_not_confirmed" in caplog.text
+
+
+def test_english_call_gets_the_english_identity_question():
+    agent, call, store, session = make_agent()
+    agent.language.current = "en"
+    call.heard("okay")
+    run_tool(agent, agent.report_person(None, "customer"))
+    assert session.said == ["Am I speaking with Sunita?"]
+
+
+def test_repeated_greeting_is_dropped_and_the_rest_kept(monkeypatch):
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    assert reply_to(agent, monkeypatch, GREETING_AGAIN + " आप इसे कब pay कर पाएंगे?") == \
+        "आप इसे कब pay कर पाएंगे? "
+
+
+def test_only_a_greeting_before_identity_asks_who_it_is(monkeypatch):
+    agent, call, store, session = make_agent()
+    assert reply_to(agent, monkeypatch, GREETING_AGAIN) == "क्या मेरी बात Sunita जी से हो रही है?"
+
+
+def test_only_a_greeting_after_identity_gives_the_reminder_again(monkeypatch):
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    assert reply_to(agent, monkeypatch, "नमस्ते Sunita जी।") == \
+        "आपकी ₹2,200 की EMI 10 September को due थी। आप इसे कब pay कर पाएंगे?"
+
+
+def test_only_a_greeting_while_owing_a_dob_asks_for_it(monkeypatch):
+    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_plus_dob")
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    assert reply_to(agent, monkeypatch, GREETING_AGAIN) == DOB_HI
+
+
+def turn_with_ctx(agent, text):
+    """Runs the turn hook with a real context; returns the system lines it added."""
+    ctx = llm.ChatContext.empty()
+
+    async def go():
+        await agent.on_user_turn_completed(ctx, llm.ChatMessage(role="user", content=[text]))
+    asyncio.run(go())
+    return [m.text_content for m in ctx.items if m.type == "message" and m.role == "system"]
+
+
+def test_weekday_date_is_added_to_the_turn(caplog):
+    agent, call, store, session = make_agent()  # today is Wednesday 28 October
+    confirmed(call)
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        added = turn_with_ctx(agent, "is Friday kar dungi")
+    assert added == ["The caller named these days (IST): Friday = Friday 30 October. Use exactly these dates."]
+    assert "RULE weekday_resolved: Friday = Friday 30 October" in caplog.text
+
+
+def test_turn_without_a_day_adds_nothing():
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    assert turn_with_ctx(agent, "haan ji") == []
+
+
+def test_agreed_date_and_link_request_waits_then_sends_and_closes(caplog):
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    agent_said(agent, "ठीक है, शुक्रवार 30 October को pay करेंगे, सही?")
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, "हाँ, WhatsApp पे भेज दो") is False
+        refused = run_tool(agent, agent.send_payment_link(None, "whatsapp"))
+        assert refused["reason"] == "record_promise_first" and store.latest_link("C002") is None
+        assert run_tool(agent, agent.record_promise_to_pay(None, 30, 10, 2026)) == "stopped"
+    assert store.latest_link("C002")["channel"] == "whatsapp"
+    assert session.said == [SENT_CLOSE]
+    assert session.closed is True and call.outcome == "promise_to_pay"
+    for rule in ("RULE promise_date_agreed", "RULE record_promise_first", "RULE link_after_promise",
+                 "RULE promise_close"):
+        assert rule in caplog.text
+
+
+def test_promise_without_a_waiting_link_goes_back_to_the_ai():
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    r = run_tool(agent, agent.record_promise_to_pay(None, 30, 10, 2026))
+    assert r["saved"] is True and session.said == [] and store.latest_link("C002") is None
+
+
+def test_loan_talk_before_identity_falls_back_to_the_identity_question(monkeypatch):
+    # found in a real nano run: greeting + EMI before report_person, both dropped
+    agent, call, store, session = make_agent()
+    out = reply_to(agent, monkeypatch, GREETING_AGAIN + " आपकी EMI ₹2,200 की due थी 10 September।")
+    assert out == "क्या मेरी बात Sunita जी से हो रही है?"
+
+
+def test_third_party_still_hears_try_them_later(monkeypatch):
+    agent, call, store, session = make_agent()
+    call.report_person("third_party")
+    assert reply_to(agent, monkeypatch, "आपकी EMI ₹2,200 है।") == \
+        "मैं उनसे बाद में फिर से बात करने की कोशिश करूँगी।"
+
+
+@pytest.mark.parametrize("text", ["nahi, kal hi kar dungi", "नहीं, 2 November को", "no, Monday"])
+def test_no_with_a_new_day_is_not_a_link_decline(text):
+    # found in a real nano run: the call closed on the old date
+    agent, call, store, session = make_agent()
+    promise_made(call)
+    agent_said(agent, "क्या मैं आपको payment link भेज दूँ?")
+    assert hear(agent, text) is False
+    assert session.said == [] and session.closed is False
+
+
+def test_a_new_day_after_a_promise_tells_the_ai_it_can_change_it():
+    # found in a real nano run: "nahi, kal hi" after a 30 October promise kept the old date
+    agent, call, store, session = make_agent()
+    promise_made(call)  # 30 October
+    added = turn_with_ctx(agent, "nahi, kal hi kar dungi")
+    assert added[1] == ("The saved promise is Friday 30 October, but the caller named Thursday "
+                        "29 October. If they are changing the promise date, call "
+                        "record_promise_to_pay with the new date; it replaces the old one.")
+
+
+def test_the_same_day_as_the_promise_adds_no_change_note():
+    agent, call, store, session = make_agent()
+    promise_made(call)
+    assert len(turn_with_ctx(agent, "haan, Friday pakka")) == 1
+
+
+def test_a_clear_yes_before_identity_tells_the_ai_to_report_it():
+    agent, call, store, session = make_agent()
+    assert turn_with_ctx(agent, "हाँ जी, बोलिए") == [
+        "The caller just confirmed they are Sunita. Call report_person with status customer now."]
+    assert turn_with_ctx(agent, "Okay") == []

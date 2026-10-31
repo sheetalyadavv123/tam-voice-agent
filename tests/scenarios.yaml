@@ -1,6 +1,7 @@
 - name: pays_now
   customer: C002
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true, next: give_reminder}}
     - {call: get_due_details, expect: {emi_amount: 2200, overdue_days: 44}, expect_absent: [outstanding, dob]}
     - {hear: "SMS pe bhej dijiye"}
@@ -16,6 +17,7 @@
 - name: promises_a_date
   customer: C007
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: get_due_details, expect: {emi_amount: 15000, overdue_days: 7}}
     - {call: record_promise_to_pay, args: {day: 30, month: 10, year: 2026}, expect: {saved: true, date: "2026-10-30", amount: 15000}}
@@ -27,6 +29,7 @@
 - name: already_paid_being_processed
   customer: C004
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: check_payment_status, expect: {status: reconciling, amount: 3200}}
     - {call: record_outcome, args: {outcome: already_paid_confirmed}, expect: {saved: true}}
@@ -37,6 +40,7 @@
 - name: already_paid_but_not_in_records
   customer: C005
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: check_payment_status, expect: {status: none}}
     - {call: record_outcome, args: {outcome: already_paid_confirmed}, expect: {saved: false, error: not_supported_by_records}}
@@ -54,6 +58,7 @@
     - {call: send_payment_link, args: {channel: sms}, expect: {error: not_unlocked}}
     - {call: record_promise_to_pay, args: {day: 30, month: 10, year: 2026}, expect: {error: not_unlocked}}
     - {hear: "actually main hi hoon"}
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {"ok": true, "next": "ask_date_of_birth"}}
     - {call: get_due_details, expect: {error: not_unlocked}}
     - {call: record_outcome, args: {outcome: third_party}, expect: {saved: true}}
@@ -84,6 +89,7 @@
 - name: hardship_and_distress
   customer: C008
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: get_due_details, expect: {emi_amount: 1800, overdue_days: 95}}
     - {call: record_outcome, args: {outcome: hardship}, expect: {saved: true}}
@@ -95,6 +101,7 @@
 - name: promise_too_far_goes_to_human
   customer: C002
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: record_promise_to_pay, args: {day: 20, month: 11, year: 2026}, expect: {saved: false, reason: too_far, next: offer_human_callback}}
     - {call: record_promise_to_pay, args: {day: 31, month: 2, year: 2026}, expect: {saved: false, reason: impossible_date}}
@@ -107,6 +114,7 @@
 - name: loan_already_closed
   customer: C009
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true}}
     - {call: get_due_details, expect: {loan_closed: true}, expect_absent: [emi_amount]}
     - {call: send_payment_link, args: {channel: sms}, expect: {sent: false, reason: no_payment_due}}
@@ -120,6 +128,7 @@
   customer: C002
   mode: name_plus_dob
   steps:
+    - {hear: "haan ji"}
     - {call: report_person, args: {status: customer}, expect: {ok: true, next: ask_date_of_birth}}
     - {call: get_due_details, expect: {error: not_unlocked}}
     - {hear: "31 February 1990"}

@@ -2,7 +2,7 @@
 import logging
 from datetime import datetime
 
-from tools import caller_words, policy, rules
+from tools import caller_words, dates, policy, rules
 from tools.rules import IST
 from tools.store import CHANNELS
 from typing import Literal
@@ -71,11 +71,27 @@ class Call:
         self.callback_id = None
         self.handoff_callback_id = None
         self.caller_lines = []  # what the caller said, newest last
+        # A date the agent read back ("6 November, सही?") and the caller said yes to. Until a
+        # promise is saved, no link goes out; the link they asked for waits here.
+        self.read_back_date = None
+        self.link_waiting = False
 
     def heard(self, text):
         """The agent passes every finished caller message here."""
         if text and text.strip():
             self.caller_lines.append(text.strip())
+
+    def caller_agreed_to(self, agent_text, caller_text):
+        """The agent's last message and the caller's answer. If the agent read back a date
+        from today on and the caller said yes, remember it. Returns that date or None."""
+        today = self.clock().date()
+        future = [d for d in dates.dates_said(agent_text or "", today) if d >= today]
+        if not future or not caller_words.agrees(caller_text or ""):
+            return None
+        if self.promise and self.promise["date"] == future[-1]:
+            return None  # already the saved promise
+        self.read_back_date = future[-1]
+        return self.read_back_date
 
     # ---- facts the code (not the AI) may use ----
     @property
@@ -130,6 +146,13 @@ class Call:
                         "next": "ask_when_to_reach_the_customer"}
             self.person_corrections += 1
             self.needs_dob = True
+        elif status == "customer" and self.person_status != "customer":
+            # A bare "okay" or "kaun?" is not "yes, it's me"
+            last = self.caller_lines[-1] if self.caller_lines else ""
+            if not caller_words.confirms_identity(last, self.first_name):
+                logger.info("RULE identity_not_confirmed: %r", last[:60])
+                return {"ok": False, "reason": "caller_did_not_confirm_identity",
+                        "next": "confirm_identity_again"}
         if status == "third_party":
             self.was_third_party = True
         self.person_status = status
@@ -213,6 +236,11 @@ class Call:
             return {"sent": False, "reason": "no_payment_due"}
         # Only send when the caller named a channel; "okay" or "haan" is not enough.
         named = caller_words.named_channel(self.caller_lines)
+        if self.read_back_date:  # an agreed date that is not the saved promise (yet)
+            self.link_waiting = named is not None
+            logger.info("RULE record_promise_first: %s was agreed but not saved", self.read_back_date)
+            return {"sent": False, "reason": "record_promise_first",
+                    "date": self.read_back_date.isoformat(), "next": "record_promise_first"}
         if named is None:
             return {"sent": False, "reason": "caller_did_not_name_a_channel",
                     "next": "ask_sms_or_whatsapp"}
@@ -282,7 +310,9 @@ class Call:
         if loan["status"] == "closed" or loan["emi_amount"] <= 0:
             return {"saved": False, "reason": "no_payment_due"}
         check = rules.validate_promise_date(day, month, year, today=self.clock().date())
+        self.read_back_date = None  # saved or not, the link no longer waits on it
         if not check["ok"]:
+            self.link_waiting = False
             nxt = "offer_human_callback" if check["reason"] == "too_far" else "ask_date_again"
             return {"saved": False, "reason": check["reason"], "next": nxt}
         saved = self.store.add_promise(

@@ -60,6 +60,14 @@ DECLINE = re.compile(
     r"|नहीं|नही|मत(?:\s|$)|रहने\s+दो|ज़रूरत\s+नहीं|जरूरत\s+नहीं",
     re.I)
 DECLINE_MAX_WORDS = 6
+_EDGE_L, _EDGE_R = r"(?<![A-Za-zऀ-ॿ])", r"(?![A-Za-zऀ-ॿ])"
+# "Am I speaking with Sunita?" -> "haan ji" / "yes" / "ji, boliye". A bare "okay" is not a yes.
+YES_FIRST = re.compile(
+    r"^\W*(?:haan|haa|han|ha|haanji|ji|jee|yes|yeah|yep|yup|हाँ|हां|हा|जी)" + _EDGE_R, re.I)
+# Agreeing to something the agent read back, like "6 November, सही?"
+AGREE = re.compile(
+    _EDGE_L + r"(?:haan|haa|han|ha|haanji|ji|jee|yes|yeah|yep|ok|okay|sahi|correct|right|theek"
+    r"|thik|done|हाँ|हां|हा|जी|सही|ठीक|ओके)" + _EDGE_R, re.I)
 
 
 def said_recently(lines, pattern):
@@ -111,6 +119,20 @@ def declines(text):
     return bool(DECLINE.search(text.strip()))
 
 
+def confirms_identity(text, first_name):
+    """Does this message clearly say "yes, it's me"? "haan ji", "yes", "main hi", "speaking",
+    "I am", or the customer's name count; "okay", a question, or "I'm his sister" do not."""
+    if not text or says_not_the_customer(text) or asks_why_calling(text):
+        return False
+    named = re.search(_EDGE_L + re.escape(first_name) + _EDGE_R, text, re.I)
+    return bool(YES_FIRST.search(text) or I_AM.search(text) or named)
+
+
+def agrees(text):
+    """A yes to what the agent just read back ("हाँ, सही है", "okay"), not a "no"."""
+    return bool(AGREE.search(text)) and not DECLINE.search(text)
+
+
 def legal_question(text):
     return bool(LEGAL.search(NOT_LEGAL.sub(" ", text)))
 
@@ -146,6 +168,14 @@ PROMISE_CLOSE_SENT = {
 PROMISE_CLOSE_DECLINED = {
     "hi": "ठीक है {name} जी। ₹{amount} का payment {date} तक कर दीजिए। धन्यवाद, आपका दिन शुभ हो।",
     "en": "All right, {name}. Please pay ₹{amount} by {date}. Thank you, have a good day.",
+}
+CONFIRM_IDENTITY = {
+    "hi": "क्या मेरी बात {name} जी से हो रही है?",
+    "en": "Am I speaking with {name}?",
+}
+DUE_QUESTION = {
+    "hi": "आपकी ₹{amount} की EMI {date} को due थी। आप इसे कब pay कर पाएंगे?",
+    "en": "Your EMI of ₹{amount} was due on {date}. When will you be able to pay it?",
 }
 DOB_QUESTION = {
     "hi": "{name} जी, verification के लिए कृपया अपनी date of birth बताइए, दिन, महीना और साल।",

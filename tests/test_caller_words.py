@@ -1,5 +1,6 @@
 import pytest
 
+from tools import caller_words
 from tools.caller_words import (
     asks_why_calling, legal_question, named_a_time, named_channel, says_not_the_customer,
 )
@@ -102,3 +103,29 @@ def test_i_am_the_customer(lines):
 ])
 def test_said_a_date(lines, said):
     assert said_a_date(lines) is said
+
+
+# ---- batch 3: only a clear yes confirms identity ----
+
+@pytest.mark.parametrize("text", [
+    "haan ji", "हाँ, मैं ही बोल रही हूँ", "जी, बोलिए", "ji haan", "yes", "Yes, speaking",
+    "main hi hoon", "I am", "It's me", "Sunita here", "हां जी",
+])
+def test_clear_yes_confirms_identity(text):
+    assert caller_words.confirms_identity(text, "Sunita") is True
+
+
+@pytest.mark.parametrize("text", [
+    "okay", "Okay", "ok", "hmm", "", "kaun bol raha hai?", "kya kaam hai ji?",
+    "haan, main unki behen hoon", "wrong number", "theek hai",
+])
+def test_okay_or_a_question_does_not_confirm(text):
+    assert caller_words.confirms_identity(text, "Sunita") is False
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("हाँ, 6 November सही है", True), ("haan, WhatsApp pe bhej do", True), ("okay", True),
+    ("ji", True), ("नहीं, 7 November", False), ("WhatsApp pe bhej do", False),
+])
+def test_agrees_to_a_read_back(text, expected):
+    assert caller_words.agrees(text) is expected

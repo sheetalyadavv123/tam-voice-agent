@@ -2,6 +2,7 @@ from datetime import date, datetime
 
 import pytest
 
+from tests.helpers import confirmed
 from tools import policy, simulator
 from tools.collection_tools import Call
 from tools.followups import run_due_followups
@@ -145,7 +146,7 @@ def test_callback_merges_into_followup_call(store):
 # ---------- other pieces ----------
 def test_new_promise_cancels_old_one(store):
     c = Call(store, "C011", session_id="s1", clock=lambda: NOW)
-    c.report_person("customer")
+    confirmed(c)
     assert c.record_promise_to_pay(29, 10, 2026)["saved"] is True
     open_ones = store.promises_for("C011", "open")
     assert [p["promised_date"] for p in open_ones] == [date(2026, 10, 29)]

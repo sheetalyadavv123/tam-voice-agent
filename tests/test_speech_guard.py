@@ -281,3 +281,54 @@ def test_sentences_to_the_customer_use_neutral_forms(text, expected):
 ])
 def test_agent_and_others_keep_their_forms(text):
     assert clean_sentence(text, language="hi")[0] == text
+
+
+# ---- batch 3: the greeting is not repeated ----
+
+@pytest.mark.parametrize("sentence", [
+    "नमस्ते, मैं Tam Infosoft की AI असिस्टेंट बोल रही हूँ।",
+    "नमस्ते Sunita, मैं Tam Infosoft की तरफ से AI assistant बोल रही हूँ।",
+    "नमस्ते Sunita जी, मैं Tam Infosoft की AI voice assistant बोल रही हूँ।",
+    "मैं Tam Infosoft की AI सहायक बोल रही हूँ।",
+    "Hello, this is the AI assistant from Tam Infosoft.",
+    "नमस्ते Sunita जी।",
+    "Hello Sunita.",
+])
+def test_repeated_greeting_is_dropped(sentence):
+    g = ReplyGuard("hi", greeted=True)
+    assert g.feed(sentence + " ") == ""
+    assert g.events[0][0] == "repeat_greeting"
+
+
+@pytest.mark.parametrize("sentence", [
+    "जी, मैं एक AI असिस्टेंट हूँ।",                  # answering "are you a robot?"
+    "Yes, I'm an AI assistant from Tam Infosoft.",
+    "Hi, how are you doing today?",
+])
+def test_answers_about_being_an_ai_are_kept(sentence):
+    assert ReplyGuard("hi", greeted=True).feed(sentence + " ") == sentence + " "
+
+
+def test_greeting_kept_before_the_code_greeted():
+    s = "नमस्ते, मैं Tam Infosoft की AI असिस्टेंट बोल रही हूँ। "
+    assert ReplyGuard("hi").feed(s) == s
+
+
+def test_rest_of_the_reply_survives_a_dropped_greeting():
+    g = ReplyGuard("hi", greeted=True, step_fallback="STEP")
+    out = g.feed("नमस्ते Sunita जी, मैं Tam Infosoft की AI असिस्टेंट बोल रही हूँ। "
+                 "आप इसे कब pay कर पाएंगे? ")
+    assert out == "आप इसे कब pay कर पाएंगे? " and g.finish() == ""
+
+
+def test_only_a_greeting_falls_back_to_the_current_step():
+    g = ReplyGuard("hi", greeted=True, step_fallback="STEP")
+    g.feed("नमस्ते Sunita जी। ")
+    assert g.finish() == "STEP"
+    assert ("step_fallback", "STEP") in g.events
+
+
+def test_without_a_step_line_the_usual_fallback_is_used():
+    g = ReplyGuard("hi", greeted=True)
+    g.feed("नमस्ते Sunita जी। ")
+    assert g.finish() == FALLBACK["hi"]

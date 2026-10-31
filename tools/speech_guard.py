@@ -22,6 +22,9 @@ runs each reply through clean_sentence before it reaches the voice.
   words such as payment, link, EMI and WhatsApp stay as they are.
 - When someone else answered, a promise that "a colleague will call" becomes
   "I'll try them again later": colleagues only call the customer.
+- After the code's greeting, a sentence that greets again ("नमस्ते ... AI असिस्टेंट
+  बोल रही हूँ") is dropped. If nothing is left, the agent carries on with the step
+  the call is at (step_fallback).
 - A reply is cut to MAX_SENTENCES.
 """
 import re
@@ -99,6 +102,22 @@ ROMAN_HINDI = [
     (r"ji", "जी"),
 ]
 ROMAN_HINDI = [(re.compile(rf"(?<![A-Za-z]){p}(?![A-Za-z])", re.I), new) for p, new in ROMAN_HINDI]
+
+# The greeting again: "नमस्ते Sunita जी, मैं Tam Infosoft की AI असिस्टेंट बोल रही हूँ।",
+# "Hello, this is the AI assistant from ...", or a bare "नमस्ते Sunita जी।". A plain
+# answer like "जी, मैं एक AI असिस्टेंट हूँ।" is kept: the customer may ask.
+AI_ASSISTANT = re.compile(
+    r"\bAI\s*(?:voice\s*)?(?:असिस्टेंट|assistant|सहायक|सहायिका)", re.I)
+INTRO = re.compile(
+    r"नमस्ते|नमस्कार|\bhello\b|\bhi\b|बोल\s+रही|\bspeaking\b|\bcalling\b", re.I)
+BARE_GREETING = re.compile(
+    r"^\W*(?:नमस्ते|नमस्कार|hello|hi)(?:[\s,]+[\wऀ-ॿ]+){0,2}[\s,]*(?:जी|ji)?\W*$", re.I)
+
+
+def repeats_greeting(sentence: str) -> bool:
+    return bool((AI_ASSISTANT.search(sentence) and INTRO.search(sentence))
+                or BARE_GREETING.match(sentence))
+
 
 LOCKED_FALLBACK = {
     "hi": "मैं उनसे बाद में फिर से बात करने की कोशिश करूँगी।",
@@ -274,12 +293,17 @@ class ReplyGuard:
     checked sentences. `events` lists what was changed, for the logs."""
 
     def __init__(self, language: str, locked: bool = False, third_party: bool = False,
-                 locked_fallback: str | None = None):
+                 locked_fallback: str | None = None, greeted: bool = False,
+                 step_fallback: str | None = None):
         self.language = language
         self.locked = locked
         self.third_party = third_party
         # said instead of LOCKED_FALLBACK, e.g. the DOB question when that is what's missing
         self.locked_fallback = locked_fallback
+        # the greeting was already spoken, so a repeat of it is dropped; if nothing else is
+        # left, step_fallback carries on with the current step instead
+        self.greeted = greeted
+        self.step_fallback = step_fallback
         self.said_try_again = False
         self.buffer = ""
         self.spoken = 0
@@ -296,6 +320,10 @@ class ReplyGuard:
         out = self._check(rest) if rest.strip() else ""
         if self.spoken == 0 and any(e[0] != "rewritten" for e in self.events):
             self.spoken += 1
+            only_greeting = all(e[0] in ("rewritten", "repeat_greeting") for e in self.events)
+            if only_greeting and self.step_fallback:
+                self.events.append(("step_fallback", self.step_fallback))
+                return self.step_fallback
             if self.locked and self.locked_fallback:
                 self.events.append(("locked_fallback", self.locked_fallback))
                 return self.locked_fallback
@@ -306,6 +334,9 @@ class ReplyGuard:
     def _check(self, sentence: str) -> str:
         if self.spoken >= MAX_SENTENCES:
             self.events.append(("too_long", sentence))
+            return ""
+        if self.greeted and repeats_greeting(sentence):
+            self.events.append(("repeat_greeting", sentence))
             return ""
         if self.third_party and COLLEAGUE.search(sentence):
             self.events.append(("colleague_for_third_party", sentence))
