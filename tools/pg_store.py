@@ -3,7 +3,12 @@
 Company data (customers, payment records) still comes from the mock files. Only the
 agent's own tables live in Postgres: call_attempts, promises, payment_links, callbacks.
 Call flush() once, at the end of a call.
+
+A customer has at most one open promise (a unique index makes sure). Two calls can
+load the same customer before either saves, so flush() checks the database again
+before it adds an open promise: the newest promise stays open, the older is cancelled.
 """
+import logging
 import uuid
 from datetime import timedelta
 
@@ -12,6 +17,7 @@ import asyncpg
 from tools.rules import now_ist
 from tools.store import MemoryStore, load_company_data
 
+logger = logging.getLogger("tam-voice-agent")
 ATTEMPT_LOOKBACK_DAYS = 8
 _FILTER = "($1::text[] IS NULL OR customer_id = ANY($1::text[]))"
 
@@ -118,11 +124,16 @@ class PostgresStore(MemoryStore):
                     await conn.execute("UPDATE payment_links SET status = $1, paid_at = $2 WHERE id = $3",
                                        l["status"], l["paid_at"], l["id"])
                 for p in ch["new_promises"]:
+                    status = p["status"]
+                    if status == "open":
+                        status = await self._open_promise_status(conn, p)
+                        if status is None:
+                            continue  # the same date is already open: a duplicate, not a new row
                     await conn.execute(
                         "INSERT INTO promises (customer_id, promised_date, amount, status, session_id, created_at) "
                         "VALUES ($1, $2, $3, $4, $5, $6) "
-                        "ON CONFLICT (customer_id, promised_date) WHERE status = 'open' DO NOTHING",
-                        p["customer_id"], p["promised_date"], p["amount"], p["status"],
+                        "ON CONFLICT (customer_id) WHERE status = 'open' DO NOTHING",
+                        p["customer_id"], p["promised_date"], p["amount"], status,
                         _uuid_or_none(p["session_id"]), p["created_at"])
                 for c in ch["new_callbacks"]:
                     await conn.execute(
@@ -147,3 +158,25 @@ class PostgresStore(MemoryStore):
                 await conn.close()
         self._flushed = True
         return {k: len(v) for k, v in ch.items()}
+
+    @staticmethod
+    async def _open_promise_status(conn, p):
+        """How to save a new open promise, given what other calls saved since we loaded:
+        "open" (older open promises are cancelled first), "cancelled" (a newer promise is
+        already open) or None (the same date is already open, so nothing new to save)."""
+        cid = p["customer_id"]
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", cid)  # one flush per customer at a time
+        rows = await conn.fetch(
+            "SELECT promised_date, created_at FROM promises WHERE customer_id = $1 AND status = 'open'", cid)
+        if any(r["promised_date"] == p["promised_date"] for r in rows):
+            logger.info("RULE one_open_promise: %s %s already open, not saved twice", cid, p["promised_date"])
+            return None
+        if any(r["created_at"] > p["created_at"] for r in rows):
+            logger.info("RULE one_open_promise: %s has a newer open promise, %s saved as cancelled",
+                        cid, p["promised_date"])
+            return "cancelled"
+        done = await conn.execute(
+            "UPDATE promises SET status = 'cancelled' WHERE customer_id = $1 AND status = 'open'", cid)
+        if done != "UPDATE 0":
+            logger.info("RULE one_open_promise: %s older open promise cancelled for %s", cid, p["promised_date"])
+        return "open"

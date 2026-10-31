@@ -177,8 +177,8 @@ def test_money_words_dropped_for_third_party():
 
 @pytest.mark.parametrize("text, expected", [
     ("आपकी EMI 10 September को देय थी।", "आपकी EMI 10 September को due थी।"),
-    ("आप कब तक भर पाएँगी?", "आप कब तक pay कर पाएँगी?"),
-    ("क्या आप भुगतान कर पाएंगी?", "क्या आप pay कर पाएंगी?"),
+    ("आप कब तक भर पाएँगी?", "आप कब तक pay कर पाएँगे?"),
+    ("क्या आप भुगतान कर पाएंगी?", "क्या आप pay कर पाएंगे?"),
 ])
 def test_simpler_words(text, expected):
     assert clean_sentence(text)[0] == expected
@@ -209,3 +209,75 @@ def test_third_party_hears_try_again_not_colleague():
 def test_customer_can_still_hear_about_a_colleague():
     g = ReplyGuard("en")
     assert stream(g, ["A colleague will call you back."]).strip() == "A colleague will call you back."
+
+
+# ---- Hindi in Roman letters becomes Devanagari in a Hindi call ----
+
+@pytest.mark.parametrize("text, expected", [
+    ("Theek hai, maine note kar liya hai.", "ठीक है, मैंने note कर लिया hai."),
+    ("Thik hai ji.", "ठीक है जी."),
+    ("Sunita ji, aapka payment link WhatsApp pe gaya.", "Sunita जी, आपका payment link WhatsApp pe gaya."),
+    ("aapki EMI pending hai. Dhanyavaad!", "आपकी EMI pending hai. धन्यवाद!"),
+    ("2,200 rupaye 30 October ko.", "₹2,200 30 October ko."),
+])
+def test_roman_hindi_becomes_devanagari_in_a_hindi_call(text, expected):
+    assert clean_sentence(text, language="hi")[0] == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Payment link sent on WhatsApp for your EMI.",
+    "I'll send the link by SMS.",
+    "Did the EMI payment go through?",
+])
+def test_english_words_are_left_alone(text):
+    assert clean_sentence(text, language="hi")[0] == text
+
+
+def test_english_call_keeps_roman_hindi():
+    assert clean_sentence("Theek hai, maine note kar liya.", language="en")[0] == \
+        "Theek hai, maine note kar liya."
+
+
+def test_guard_converts_roman_hindi():
+    g = ReplyGuard("hi")
+    assert g.feed("Theek hai ji. ") == "ठीक है जी. "
+
+
+# ---- a customer who still owes a DOB hears the DOB question ----
+
+def test_locked_fallback_line_replaces_try_later():
+    g = ReplyGuard("hi", locked=True, locked_fallback="DOB?")
+    assert g.feed("आपकी EMI ₹2,200 है। ") == ""
+    assert g.finish() == "DOB?"
+    assert ("locked_fallback", "DOB?") in g.events
+
+
+def test_no_locked_fallback_keeps_try_later():
+    g = ReplyGuard("hi", locked=True)
+    g.feed("आपकी EMI ₹2,200 है। ")
+    assert g.finish() == LOCKED_FALLBACK["hi"]
+
+
+# ---- the customer gets gender-neutral Hindi ----
+
+@pytest.mark.parametrize("text, expected", [
+    ("आप EMI pay कर देंगी और हो जाए तो बताइए?", "आप EMI pay कर देंगे और हो जाए तो बताइए?"),
+    ("क्या आप 30 October को pay कर पाएँगी?", "क्या आप 30 October को pay कर पाएँगे?"),
+    ("आप एक बार फिर try कर लेंगी?", "आप एक बार फिर try कर लेंगे?"),
+    ("आप 6 November को बोल रही हैं, सही?", "आप 6 November को बोल रहे हैं, सही?"),
+    ("क्या आप अभी बात कर सकती हैं?", "क्या आप अभी बात कर सकते हैं?"),
+    ("क्या आप भर पाएँगी?", "क्या आप pay कर पाएँगे?"),
+    ("ठीक है, आप 6 November को ₹2,200 pay करने वाली हैं।", "ठीक है, आप 6 November को ₹2,200 pay करने वाले हैं।"),
+])
+def test_sentences_to_the_customer_use_neutral_forms(text, expected):
+    assert clean_sentence(text, language="hi")[0] == expected
+
+
+@pytest.mark.parametrize("text", [
+    "मैं आपकी मदद कर सकती हूँ।",                       # the agent herself
+    "मैं link भेजूँगी।",
+    "हमारी एक सहयोगी आपको वापस कॉल करेंगी।",            # the colleague, not "आप"
+    "आपकी EMI 10 September को due थी।",                # the EMI, not the customer
+])
+def test_agent_and_others_keep_their_forms(text):
+    assert clean_sentence(text, language="hi")[0] == text

@@ -48,6 +48,18 @@ NOT_THE_CUSTOMER = re.compile(
     r"|son|daughter|mummy|papa|beta|beti|maa|wrong\s?number)\b"
     r"|बहन|भाई|भैया|दीदी|पत्नी|पति|माँ|मां|मम्मी|पापा|बेटा|बेटी|रॉन्ग\s?नंबर|गलत\s?नंबर",
     re.I)
+# "Let me talk to a person": the only way the AI may claim the caller asked for one
+FOR_A_PERSON = re.compile(
+    r"\b(?:human|real\s+person|a\s+person|manager|officer|executive|customer\s+care|insaan|insan"
+    r"|kisi\s+(?:se|aur\s+se)\s+baat|aadmi)\b"
+    r"|इंसान|किसी\s+(?:से|और\s+से)\s+बात|मैनेजर|अधिकारी|एग्जीक्यूटिव|कस्टमर\s+केयर",
+    re.I)
+# "No, not needed" to the payment link
+DECLINE = re.compile(
+    r"\b(?:no|nope|nahi|nahin|nai|mat|rehne\s+do|rahne\s+do|no\s+need|not\s+needed|don'?t)\b"
+    r"|नहीं|नही|मत(?:\s|$)|रहने\s+दो|ज़रूरत\s+नहीं|जरूरत\s+नहीं",
+    re.I)
+DECLINE_MAX_WORDS = 6
 
 
 def said_recently(lines, pattern):
@@ -87,6 +99,18 @@ def says_is_the_customer(lines, first_name):
     return said_recently(lines, I_AM) is not None or said_recently(lines, named) is not None
 
 
+def asks_for_person(lines):
+    """Did the caller ask for a person, like "kisi insaan se baat karao"?"""
+    return said_recently(lines, FOR_A_PERSON) is not None
+
+
+def declines(text):
+    """A short "no" with no channel in it, like "नहीं, ज़रूरत नहीं" or "no thanks"."""
+    if len(text.split()) > DECLINE_MAX_WORDS or named_channel([text]):
+        return False
+    return bool(DECLINE.search(text.strip()))
+
+
 def legal_question(text):
     return bool(LEGAL.search(NOT_LEGAL.sub(" ", text)))
 
@@ -109,6 +133,41 @@ THIRD_PARTY_LINE = {
           "उनसे बात करने का सही समय क्या रहेगा?",
     "en": "It's a personal matter, and I can only discuss it with {name}. "
           "When would be a good time to reach them?",
+}
+
+# {name} is the customer's first name, {amount} like "2,200", {date} like "30 October".
+# The customer gets gender-neutral Hindi; the agent speaks as a woman.
+PROMISE_CLOSE_SENT = {
+    "hi": "{name} जी, link भेज दिया गया है। ₹{amount} का payment {date} तक कर दीजिए। "
+          "धन्यवाद, आपका दिन शुभ हो।",
+    "en": "{name}, the link has been sent. Please pay ₹{amount} by {date}. "
+          "Thank you, have a good day.",
+}
+PROMISE_CLOSE_DECLINED = {
+    "hi": "ठीक है {name} जी। ₹{amount} का payment {date} तक कर दीजिए। धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right, {name}. Please pay ₹{amount} by {date}. Thank you, have a good day.",
+}
+DOB_QUESTION = {
+    "hi": "{name} जी, verification के लिए कृपया अपनी date of birth बताइए, दिन, महीना और साल।",
+    "en": "{name}, for verification, please tell me your date of birth, with the day, month and year.",
+}
+DOB_RETRY = {
+    "hi": "माफ़ कीजिए, यह match नहीं हुआ। {name} जी, कृपया अपनी date of birth फिर से बताइए, "
+          "दिन, महीना और साल।",
+    "en": "Sorry, that didn't match. {name}, please tell me your date of birth again, "
+          "with the day, month and year.",
+}
+DOB_FAILED_CLOSE = {
+    "hi": "माफ़ कीजिए, मैं verification पूरा नहीं कर पाई। हम बाद में फिर से संपर्क करेंगे। धन्यवाद।",
+    "en": "Sorry, I couldn't complete the verification. We'll get in touch again later. Thank you.",
+}
+SILENCE_CHECK = {
+    "hi": "क्या आप मुझे सुन पा रहे हैं?",
+    "en": "Can you hear me?",
+}
+SILENCE_CLOSE = {
+    "hi": "लगता है आपकी आवाज़ नहीं आ रही है। हम बाद में फिर से संपर्क करेंगे। धन्यवाद।",
+    "en": "I can't seem to hear you. We'll get in touch again later. Thank you.",
 }
 
 

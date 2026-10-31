@@ -2,11 +2,16 @@
 
 The prompt alone does not switch languages reliably, so the agent asks this
 tracker after every customer turn and changes its instructions and voice.
+
+Short replies never switch: "Okay" or "Thank you" in a Hindi call is still a Hindi
+call. A message switches the call only when it has at least MIN_WORDS words, is not
+made only of filler words, and is mostly in the other language's script.
 """
 import re
 
 DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 LATIN = re.compile(r"[A-Za-z]")
+WORDS = re.compile(r"[A-Za-z'ऀ-ॿ]+")
 # Hindi written in Roman letters ("WhatsApp pe bhej do"). Only words that are not
 # also English, so "main", "do" and "to" are left out.
 HINGLISH = re.compile(
@@ -15,7 +20,8 @@ HINGLISH = re.compile(
     r"|meri|mujhe|aap|aapka|aapki|pe|kal|aaj|bhi|wala|wali|abhi|paisa|paise|dunga|dungi"
     r"|karungi|karunga|kaam|baat)\b",
     re.I)
-SWITCH_AFTER = 2  # replies in a row in the other language
+MIN_WORDS = 3
+FILLER = {"okay", "ok", "yes", "no", "haan", "hmm", "bro", "thanks", "thank", "you", "hello"}
 
 
 def turn_language(text: str) -> str | None:
@@ -28,21 +34,29 @@ def turn_language(text: str) -> str | None:
     return None
 
 
+def switch_language(text: str) -> str | None:
+    """The language this message is strong enough to switch the call to, or None.
+    "en" needs 3+ words, mostly Latin script, no Hindi in Roman letters;
+    "hi" needs 3+ words, mostly Devanagari or Hindi in Roman letters."""
+    words = WORDS.findall(text)
+    if len(words) < MIN_WORDS or all(w.lower() in FILLER for w in words):
+        return None
+    latin = sum(1 for w in words if LATIN.search(w))
+    if HINGLISH.search(text) or latin * 2 < len(words):
+        return "hi"
+    if latin * 2 > len(words):
+        return "en"
+    return None
+
+
 class LanguageTracker:
     def __init__(self, start: str):
         self.current = start
-        self.streak = 0  # replies in a row in the other language
 
     def observe(self, text: str) -> str | None:
         """Record one customer turn. Returns the new language when it changes."""
-        lang = turn_language(text)
-        if lang is None:
+        lang = switch_language(text)
+        if lang is None or lang == self.current:
             return None
-        if lang == self.current:
-            self.streak = 0
-            return None
-        self.streak += 1
-        if self.streak < SWITCH_AFTER:
-            return None
-        self.current, self.streak = lang, 0
+        self.current = lang
         return lang

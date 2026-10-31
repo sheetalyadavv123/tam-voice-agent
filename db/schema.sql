@@ -42,8 +42,10 @@ CREATE TABLE IF NOT EXISTS promises (
     session_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_open_promise
-    ON promises (customer_id, promised_date) WHERE status = 'open';
+-- One open promise per customer. Older databases: db/migrations/001_one_open_promise.sql
+DROP INDEX IF EXISTS uq_open_promise;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_open_promise_per_customer
+    ON promises (customer_id) WHERE status = 'open';
 
 CREATE TABLE IF NOT EXISTS payment_links (
     id TEXT PRIMARY KEY,

@@ -1,13 +1,17 @@
 import ast
 import inspect
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import get_args
 
+import pytest
+
 from tools.collection_tools import (
-    CALLBACK_REASONS, OUTCOMES, PERSON_STATUSES, AiCallbackReason, Call,
-    Channel, Outcome, PersonStatus,
+    CALLBACK_REASONS, HANDOFF_AFTER_PROMISE, HANDOFF_REASONS, OUTCOMES, PERSON_STATUSES,
+    AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
 )
 from tools.scenario_runner import TOOLS
 from tools.store import CHANNELS
@@ -31,6 +35,8 @@ def test_fixed_choices_match_the_rules():
     assert set(get_args(Outcome)) == OUTCOMES
     assert set(get_args(PersonStatus)) == PERSON_STATUSES
     assert set(get_args(Channel)) == CHANNELS
+    assert set(get_args(HandoffReason)) == HANDOFF_REASONS
+    assert HANDOFF_AFTER_PROMISE <= HANDOFF_REASONS
 
 
 def test_ai_callback_reasons_are_allowed_ones():
@@ -52,3 +58,26 @@ def test_agent_module_imports_cleanly():
         [sys.executable, "-c", "import sys; sys.path.insert(0, 'agent'); import main"],
         cwd=ROOT, capture_output=True, text=True)
     assert run.returncode == 0, run.stderr[-800:]
+
+def test_session_marks_the_caller_away_after_8_seconds():
+    assert "user_away_timeout=USER_AWAY_SECONDS" in MAIN_SRC
+    assert re.search(r"^USER_AWAY_SECONDS = 8$", MAIN_SRC, re.M)
+
+
+def _pace(value):
+    env = {**os.environ, "TTS_PACE": value}
+    return subprocess.run(
+        [sys.executable, "-c", "import sys; sys.path.insert(0, 'agent'); import config; print(config.TTS_PACE)"],
+        cwd=ROOT, capture_output=True, text=True, env=env)
+
+
+@pytest.mark.parametrize("value, expected", [("", "0.9"), ("0.5", "0.5"), ("2.0", "2.0"), ("1.1", "1.1")])
+def test_tts_pace_from_env(value, expected):
+    run = _pace(value)
+    assert run.returncode == 0 and run.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("value", ["0.4", "2.1", "-1"])
+def test_tts_pace_out_of_range_stops_startup(value):
+    run = _pace(value)
+    assert run.returncode != 0 and "TTS_PACE must be between 0.5 and 2.0" in run.stderr

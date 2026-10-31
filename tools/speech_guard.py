@@ -10,11 +10,16 @@ runs each reply through clean_sentence before it reaches the voice.
 - Until the customer is confirmed, a sentence that mentions the loan, EMI,
   payment or an amount is dropped, so nothing leaks to someone else.
 - "रहा/रही" style slashes keep the second, female form.
+- A sentence to the customer ("आप ...") uses gender-neutral forms: "पाएँगी" ->
+  "पाएँगे", "रही हैं" -> "रहे हैं". The agent's own "मैं ... रही हूँ" stays female.
 - Amounts and dates written as words become digits, like "दो हज़ार दो सौ" -> "2,200".
   Only numbers next to hundred/thousand/lakh, a month or "rupees" are changed, so
   "एक बार" and "one moment" stay as they are.
 - Words that are hard to catch on a phone line get simpler ones ("देय" -> "due",
-  "भर पाएँगी" -> "pay कर पाएँगी"), and this year's dates lose the year.
+  "भर पाएँगे" -> "pay कर पाएँगे"), and this year's dates lose the year.
+- In a Hindi call, common Hindi words the AI writes in Roman letters ("theek hai",
+  "maine", "rupaye") become Devanagari, so the Hindi voice reads them right. English
+  words such as payment, link, EMI and WhatsApp stay as they are.
 - When someone else answered, a promise that "a colleague will call" becomes
   "I'll try them again later": colleagues only call the customer.
 - A reply is cut to MAX_SENTENCES.
@@ -65,6 +70,15 @@ FEMALE_FIRST_PERSON = [
 ]
 # "रहा था" is only "I was" when the sentence says मैं
 FEMALE_WITH_MAIN = (re.compile(r"(रह|[ऀ-ॿ]+त)ा था(?![ऀ-ॣ])"), r"\1ी थी")
+# The customer's gender is not on record, so a sentence to "आप" uses the neutral
+# plural: "आप pay कर पाएँगी" -> "पाएँगे", "आप बोल रही हैं" -> "रहे हैं". Only a
+# standalone आप counts, so "हमारी सहयोगी आपको कॉल करेंगी" stays as it is.
+YOU = re.compile(r"(?<![ऀ-ॿ])आप(?![ऀ-ॿ])")
+NEUTRAL_YOU = [
+    (re.compile(r"([ेए][ँं]?)गी(?![ऀ-ॣ])"), r"\1गे"),
+    (re.compile(r"(रह|सक|[ऀ-ॿ]+त)ी हैं(?![ऀ-ॣ])"), r"\1े हैं"),
+    (re.compile(r"(?<![ऀ-ॿ])वाली हैं(?![ऀ-ॣ])"), "वाले हैं"),
+]
 
 FALLBACK = {
     "hi": "क्या मैं आपकी किसी और तरह से मदद कर सकती हूँ?",
@@ -72,6 +86,19 @@ FALLBACK = {
 }
 COLLEAGUE = re.compile(
     r"\b(?:colleague|team member|executive|agent)s?\b|सहयोगी|सहकर्मी|एग्जीक्यूटिव|टीम", re.I)
+
+# Hindi words in Roman letters -> Devanagari, only in a Hindi call. Longer phrases first.
+ROMAN_HINDI = [
+    (r"th(?:ee|i)k\s+hai", "ठीक है"),
+    (r"kar\s+liya", "कर लिया"),
+    (r"maine", "मैंने"),
+    (r"rupa(?:i)?ye", "रुपये"),
+    (r"aapka", "आपका"),
+    (r"aapki", "आपकी"),
+    (r"dhanya(?:v|w)aa?d", "धन्यवाद"),
+    (r"ji", "जी"),
+]
+ROMAN_HINDI = [(re.compile(rf"(?<![A-Za-z]){p}(?![A-Za-z])", re.I), new) for p, new in ROMAN_HINDI]
 
 LOCKED_FALLBACK = {
     "hi": "मैं उनसे बाद में फिर से बात करने की कोशिश करूँगी।",
@@ -200,9 +227,17 @@ def words_to_digits(text: str) -> str:
     return "".join(out)
 
 
-def clean_sentence(sentence: str, locked: bool = False) -> tuple[str, str | None]:
+def roman_to_devanagari(text: str) -> str:
+    for pattern, new in ROMAN_HINDI:
+        text = pattern.sub(new, text)
+    return text
+
+
+def clean_sentence(sentence: str, locked: bool = False,
+                   language: str | None = None) -> tuple[str, str | None]:
     """Returns (text to speak, why it was changed or None). Empty text means drop it.
-    locked: the customer is not confirmed yet, so any loan talk is dropped."""
+    locked: the customer is not confirmed yet, so any loan talk is dropped.
+    language: "hi" turns Roman-letter Hindi words into Devanagari."""
     for why, pattern in DROP.items():
         if pattern.search(sentence):
             return "", why
@@ -215,6 +250,11 @@ def clean_sentence(sentence: str, locked: bool = False) -> tuple[str, str | None
         cleaned = FEMALE_WITH_MAIN[0].sub(FEMALE_WITH_MAIN[1], cleaned)
     for pattern, new in REPLACE:
         cleaned = pattern.sub(new, cleaned)
+    if YOU.search(cleaned):
+        for pattern, new in NEUTRAL_YOU:
+            cleaned = pattern.sub(new, cleaned)
+    if language == "hi":
+        cleaned = roman_to_devanagari(cleaned)
     cleaned = words_to_digits(cleaned)
     cleaned = RUPEE_AMOUNT.sub(lambda m: f"₹{int(m.group(1)):,}", cleaned)
     cleaned = AMOUNT_THEN_RUPEES.sub(
@@ -233,10 +273,13 @@ class ReplyGuard:
     """Cleans one streamed reply. Feed it text as it arrives; it hands back only whole,
     checked sentences. `events` lists what was changed, for the logs."""
 
-    def __init__(self, language: str, locked: bool = False, third_party: bool = False):
+    def __init__(self, language: str, locked: bool = False, third_party: bool = False,
+                 locked_fallback: str | None = None):
         self.language = language
         self.locked = locked
         self.third_party = third_party
+        # said instead of LOCKED_FALLBACK, e.g. the DOB question when that is what's missing
+        self.locked_fallback = locked_fallback
         self.said_try_again = False
         self.buffer = ""
         self.spoken = 0
@@ -253,6 +296,9 @@ class ReplyGuard:
         out = self._check(rest) if rest.strip() else ""
         if self.spoken == 0 and any(e[0] != "rewritten" for e in self.events):
             self.spoken += 1
+            if self.locked and self.locked_fallback:
+                self.events.append(("locked_fallback", self.locked_fallback))
+                return self.locked_fallback
             lines = LOCKED_FALLBACK if self.locked else FALLBACK
             out = lines.get(self.language, lines["en"])
         return out
@@ -268,7 +314,7 @@ class ReplyGuard:
             self.said_try_again = True
             self.spoken += 1
             return LOCKED_FALLBACK.get(self.language, LOCKED_FALLBACK["en"]) + " "
-        cleaned, why = clean_sentence(sentence, self.locked)
+        cleaned, why = clean_sentence(sentence, self.locked, self.language)
         if why:
             self.events.append((why, sentence))
         if not cleaned.strip():

@@ -1,7 +1,7 @@
 """Make sample clips of the agent's voice, clean and as they would sound on a phone call.
 
 Usage: python scripts/phone_sim.py
-Uses SARVAM_SPEAKER and SARVAM_PACE from agent/config.py.
+Uses SARVAM_SPEAKER and TTS_PACE from agent/config.py.
 Saves audio_test/clean/<voice>_pace<pace>_<line>.wav and the same names in audio_test/phone/.
 """
 import base64
@@ -64,7 +64,7 @@ def main():
     (OUT / "clean").mkdir(parents=True, exist_ok=True)
     (OUT / "phone").mkdir(parents=True, exist_ok=True)
 
-    voice, pace = config.SARVAM_SPEAKER, config.SARVAM_PACE
+    voice, pace = config.SARVAM_SPEAKER, config.TTS_PACE
     with httpx.Client(timeout=60) as client:
         for line, text in LINES.items():
             name = f"{voice}_pace{pace}_{line}.wav"

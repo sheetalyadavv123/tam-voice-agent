@@ -20,7 +20,7 @@ async def main():
     for p in seed.get("open_promises", []):
         result = await conn.execute(
             "INSERT INTO promises (customer_id, promised_date, amount, status) VALUES ($1, $2, $3, 'open') "
-            "ON CONFLICT (customer_id, promised_date) WHERE status = 'open' DO NOTHING",
+            "ON CONFLICT (customer_id) WHERE status = 'open' DO NOTHING",  # one open promise each
             p["customer_id"], date.fromisoformat(p["promised_date"]), p["amount"])
         added += result.endswith(" 1")
     await conn.close()
