@@ -7,6 +7,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal  # noqa: F401  (kept for tool signatures)
+from urllib.parse import urlparse
 
 # Let this file import the "tools" folder in the project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -53,6 +54,7 @@ def build_tts():
             target_language_code=config.SARVAM_LANGUAGE,
             model="bulbul:v3",
             speaker=config.SARVAM_SPEAKER,
+            pace=config.SARVAM_PACE,
         )
     return elevenlabs.TTS(model=config.TTS_MODEL, voice_id=config.TTS_VOICE_ID)
 
@@ -299,6 +301,7 @@ def call_note(call, customer, kind, today):
 
 
 async def entrypoint(ctx: agents.JobContext):
+    logger.info("database host: %s", urlparse(config.DATABASE_URL).hostname)
     session_id = uuid.uuid4()
     started_at = datetime.now(timezone.utc)
     customer_id, kind = pick_target(ctx)
