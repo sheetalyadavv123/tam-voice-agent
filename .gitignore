@@ -19,3 +19,6 @@ transcripts/
 Thumbs.db
 secrets.env
 logs/
+
+# Phone simulation audio
+audio_test/

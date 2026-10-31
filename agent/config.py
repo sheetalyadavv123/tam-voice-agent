@@ -10,6 +10,8 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "multi")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "sarvam")  # sarvam | elevenlabs
 SARVAM_LANGUAGE = os.getenv("SARVAM_LANGUAGE", "hi-IN")
 SARVAM_SPEAKER = os.getenv("SARVAM_SPEAKER", "simran")
+# Chosen by listening to phone-quality clips from scripts/phone_sim.py
+SARVAM_PACE = float(os.getenv("SARVAM_PACE") or "0.9")
 TTS_MODEL = os.getenv("TTS_MODEL", "eleven_flash_v2_5")
 TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
