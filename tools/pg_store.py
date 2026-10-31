@@ -130,11 +130,11 @@ class PostgresStore(MemoryStore):
                         if status is None:
                             continue  # the same date is already open: a duplicate, not a new row
                     await conn.execute(
-                        "INSERT INTO promises (customer_id, promised_date, amount, status, session_id, created_at) "
-                        "VALUES ($1, $2, $3, $4, $5, $6) "
+                        "INSERT INTO promises (customer_id, promised_date, amount, status, session_id, "
+                        "created_at, note) VALUES ($1, $2, $3, $4, $5, $6, $7) "
                         "ON CONFLICT (customer_id) WHERE status = 'open' DO NOTHING",
                         p["customer_id"], p["promised_date"], p["amount"], status,
-                        _uuid_or_none(p["session_id"]), p["created_at"])
+                        _uuid_or_none(p["session_id"]), p["created_at"], p.get("note"))
                 for c in ch["new_callbacks"]:
                     await conn.execute(
                         "INSERT INTO callbacks (customer_id, due_at, reason, status, session_id, created_at) "

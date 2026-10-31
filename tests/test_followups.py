@@ -17,11 +17,6 @@ def ist(day, hour=10, minute=0, month=10):
 NOW = ist(28, 11)
 
 
-@pytest.fixture(autouse=True)
-def default_mode(monkeypatch):
-    monkeypatch.setattr(policy, "VERIFICATION_MODE", "name_only")
-
-
 @pytest.fixture
 def store():
     return MemoryStore.from_files(clock=lambda: NOW)

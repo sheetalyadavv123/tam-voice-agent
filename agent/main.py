@@ -23,12 +23,14 @@ from livekit.plugins import (
 
 import config
 import db
-from tools import caller_words, dates, rules
+from tools import caller_words, dates, rules, spoken
 from tools.collection_tools import (
     AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
 )
+from tools.dates import say_when
 from tools.language import LanguageTracker, turn_language
 from tools.speech_guard import ReplyGuard
+from tools.third_party import DONT_KNOW, MAX_TIME_MISSES, ThirdPartyFlow, time_outside_line
 from tools.store import MemoryStore
 from tools.pg_store import PostgresStore
 
@@ -96,17 +98,22 @@ class Collector(Agent):
         self.call = call
         self.base_instructions = instructions
         self.language = LanguageTracker(call.language)
+        self.flow = ThirdPartyFlow(call)  # someone else answered: the code runs that part
+        self.notes = {}  # sections added to the instructions during the call, by name
         self.silences = 0  # times in a row the caller went quiet
+        self.identity_asks = 0  # "Okay" at the greeting: the code asks again, twice at most
+        self.time_misses = 0  # hardship callback: answers without a usable time
         self._end_task = None
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         text = new_message.text_content or ""
         self.call.heard(text)
         self.silences = 0
+        await self._follow_language(turn_ctx, text)
         agreed = self.call.caller_agreed_to(self._last_agent_text(), text)
         if agreed:
             logger.info("RULE promise_date_agreed: %s (link waits for record_promise_to_pay)", agreed)
-        line, hang_up = self._fixed_reply(text)
+        line, hang_up = await self._code_reply(turn_ctx, text)
         if line:
             # LiveKit drops a stopped turn's message; keep it so the transcript has it
             await self._keep_in_history(new_message)
@@ -114,7 +121,7 @@ class Collector(Agent):
             raise StopResponse()
         if (turn_ctx is not None and self.call.person_status is None
                 and caller_words.confirms_identity(text, self.call.first_name)):
-            # nano sometimes answers a "haan ji" without reporting it; the tool still checks
+            # a yes with "busy" in it is left to the AI; the tool still checks
             turn_ctx.add_message(role="system", content=(
                 f"The caller just confirmed they are {self.call.first_name}. "
                 "Call report_person with status customer now."))
@@ -133,6 +140,11 @@ class Collector(Agent):
                     f"The saved promise is {dates.say(promise['date'])}, but the caller named "
                     f"{dates.say(new[-1])}. If they are changing the promise date, call "
                     "record_promise_to_pay with the new date; it replaces the old one."))
+
+    async def _follow_language(self, turn_ctx, text):
+        if self.flow.waiting_for_dob:  # "2 November 1985" says nothing about the language
+            logger.info("RULE language_hold: waiting for a date of birth (%r)", text[:60])
+            return
         switched = self.language.observe(text)
         if not switched:
             if turn_language(text) not in (None, self.language.current):
@@ -142,12 +154,166 @@ class Collector(Agent):
         logger.info("RULE language_switch: now %s after %r", name, text[:60])
         rule = (f"# Language now\nThe customer is speaking {name}. "
                 f"Reply only in {name} from now on.")
-        # update_instructions covers later turns; turn_ctx is this reply's copy
-        await self.update_instructions(self.base_instructions + "\n" + rule + "\n")
-        turn_ctx.add_message(role="system", content=rule)
+        # the instructions cover later turns; turn_ctx is this reply's copy
+        await self._add_note("language", rule)
+        if turn_ctx is not None:
+            turn_ctx.add_message(role="system", content=rule)
         if isinstance(self.session.tts, sarvam.TTS):
             self.session.tts.update_options(
                 target_language_code="en-IN" if switched == "en" else config.SARVAM_LANGUAGE)
+
+    async def _add_note(self, name, text):
+        self.notes[name] = text
+        await self.update_instructions(
+            self.base_instructions + "".join("\n" + n + "\n" for n in self.notes.values()))
+
+    async def _code_reply(self, turn_ctx, text):
+        """Every part of the call the code runs itself: who answered, the third-party
+        check, hardship and the colleague's callback time, plus the fixed answers below.
+        Returns (line, hang_up); line is None to let the AI reply."""
+        call = self.call
+        if self.flow.active:
+            return await self._flow_reply(self.flow.hear(text, self.language.current))
+        if call.person_status is None:
+            reply = await self._identity_reply(text)
+            if reply[0] or call.person_status is None:
+                return reply
+        line, hang_up = self._fixed_reply(text)
+        if line:
+            return line, hang_up
+        line = self._hardship_reply(turn_ctx, text)
+        if line:
+            return line, False
+        return self._colleague_time_reply(text)
+
+    async def _identity_reply(self, text):
+        """The answer to "am I speaking with Sunita?". A clear yes unlocks the call and the
+        code gives the reminder; someone else starts the third-party flow."""
+        call, name = self.call, self.call.first_name
+        if caller_words.someone_else(text, name):
+            return await self._flow_reply(self.flow.start(text, self.language.current))
+        if caller_words.only_filler(text) and self.identity_asks < 2:
+            self.identity_asks += 1
+            logger.info("RULE identity_not_confirmed: %r, asking again", text[:60])
+            return self._identity_question(), False
+        if not caller_words.confirms_identity(text, name) or caller_words.busy(text):
+            return None, False  # a question, or "haan, par abhi busy hoon": the AI answers
+        call.report_person("customer")
+        logger.info("RULE identity_confirmed_by_code: %r", text[:60])
+        await self._add_note("who", f"# Who\nThe caller confirmed they are {name}. The code "
+                                    "already gave the EMI reminder; carry on from there.")
+        if caller_words.hardship(text):
+            line = self._hardship_reply(None, text)
+            if line:
+                return line, False
+        return self._reminder()
+
+    async def _flow_reply(self, reply):
+        if reply.verified == "third_party":
+            tp, name = self.call.third_party, self.call.first_name
+            who = " ".join(x for x in (tp.get("relationship"), tp.get("name")) if x) or "someone"
+            await self._add_note("who", (
+                f"# Speaking with\nYou are speaking with {name}'s {who}, who passed the check. "
+                f"Talk about {name} in the third person (उनकी EMI, वे pay कर पाएंगे; "
+                f"{name}'s EMI, they). Never say आपकी EMI. The payment link only goes to "
+                f"{name}'s registered number, and you say so."))
+            return self._reminder()
+        if reply.verified == "customer":
+            await self._add_note("who", f"# Who\nThe caller is {self.call.first_name}, verified "
+                                        "by date of birth. The code already gave the EMI reminder.")
+            line, hang_up = self._reminder()
+            return self._line(caller_words.CLAIM_VERIFIED) + " " + line, hang_up
+        return reply.line, reply.hang_up
+
+    def _reminder(self):
+        """The EMI reminder, spoken by the code: (line, hang_up)."""
+        call = self.call
+        due = call.get_due_details()
+        if due.get("loan_closed"):
+            logger.info("RULE loan_closed_close: no payment due, ending the call")
+            call.record_outcome_or_better("no_resolution", "loan closed")
+            return self._line(caller_words.LOAN_CLOSED), True
+        d = date.fromisoformat(due["due_date"])
+        values = {"amount": f"{due['emi_amount']:,}", "date": f"{d.day} {d:%B}",
+                  "name": call.first_name}
+        if self._talking_to_someone_else():
+            return self._line(caller_words.TP_REMINDER, **values), False
+        if "open_promise" in due:
+            p = date.fromisoformat(due["open_promise"]["date"])
+            return self._line(caller_words.DUE_QUESTION_WITH_PROMISE, promise=f"{p.day} {p:%B}",
+                              **values), False
+        return self._line(caller_words.DUE_QUESTION, **values), False
+
+    def _talking_to_someone_else(self):
+        return self.call.person_status == "third_party" and self.call.unlocked
+
+    def _pay_date_named(self, text):
+        today = self.call.clock().date()
+        return bool(dates.days_named(text, today) or dates.dates_said(text, today)
+                    or caller_words.PAY_DAY.search(text))
+
+    def _hardship_reply(self, turn_ctx, text):
+        """Hardship, read from the caller's words. With a day to pay, the AI records the
+        promise and the call closes normally, with no colleague. Without one, the code asks
+        once for a date; if none comes, a colleague calls back at the time they give."""
+        call = self.call
+        if not call.unlocked or call.push_stopped or call.hardship in ("with_date", "no_date"):
+            return None
+        if call.hardship is None:
+            if not caller_words.hardship(text):
+                return None
+            logger.info("RULE hardship_detected: %s", text[:80])
+            if not self._pay_date_named(text):
+                call.hardship = "asked_date"
+                logger.info("RULE hardship_date_ask: asking once for a date")
+                return self._line(caller_words.HARDSHIP_DATE_ASK, name=call.first_name)
+        elif not self._pay_date_named(text):  # asked once, no date: a colleague takes it
+            call.hardship = "no_date"
+            logger.info("RULE hardship_no_date: colleague callback, asking for a time")
+            self._run("transfer_to_human", call.transfer_to_human, "hardship")
+            call.record_outcome("hardship", "hardship, no pay date")
+            return self._line(caller_words.HARDSHIP_CALLBACK)
+        call.hardship = "with_date"
+        logger.info("RULE hardship_with_date: the promise closes the call, no colleague")
+        if turn_ctx is not None:
+            turn_ctx.add_message(role="system", content=(
+                "The customer has a money problem but named a day to pay. Be kind, read the "
+                "date back and call record_promise_to_pay. Don't mention a colleague or a call back."))
+        return None
+
+    def _colleague_time_reply(self, text):
+        """After hardship or a dispute, a time the caller gives for the colleague's call is
+        read by the code, saved, and the call closes. In the code's own hardship flow every
+        answer is handled here; after a dispute, other messages go to the AI."""
+        call = self.call
+        if not call.push_stopped or call.callback_confirmed:
+            return None, False
+        strict = call.hardship == "no_date"
+        if strict and DONT_KNOW.search(text):
+            return self._handoff_close(None)
+        said = spoken.callback_time(text, call.clock())
+        if "when" in said:
+            w = said["when"]
+            result = self._run("schedule_callback", call.schedule_callback, w.day, w.month,
+                               w.year, w.hour, w.minute, "customer_requested")
+            if result.get("saved"):
+                return self._handoff_close(w)
+        elif not strict:
+            return None, False
+        self.time_misses += 1
+        if strict and self.time_misses >= MAX_TIME_MISSES:
+            return self._handoff_close(None)
+        if "when" in said:
+            return time_outside_line(self.language.current), False
+        return self._line(caller_words.TIME_INCOMPLETE), False
+
+    def _handoff_close(self, when):
+        if when is None:
+            logger.info("RULE handoff_close: no time given, colleague calls at the next window")
+            return self._line(caller_words.HANDOFF_CLOSE_NO_TIME, name=self.call.first_name), True
+        logger.info("RULE handoff_close: colleague callback at %s, ending the call", when.isoformat())
+        return self._line(caller_words.HANDOFF_CLOSE, name=self.call.first_name,
+                          when=say_when(when, self.language.current)), True
 
     def _fixed_reply(self, text):
         """Some questions get a fixed answer from the code and the AI doesn't get the turn.
@@ -164,20 +330,15 @@ class Collector(Agent):
             logger.info("RULE promise_close: link declined after a promise (%r)", text[:60])
             self.call.record_outcome_or_better("promise_to_pay")
             return self._promise_close(caller_words.PROMISE_CLOSE_DECLINED), True
-        if self.call.person_status in (None, "third_party") and caller_words.asks_why_calling(text):
-            if self.call.person_status is None:
-                if not caller_words.says_not_the_customer(text):
-                    return None, False  # maybe the customer themselves; the AI confirms who
-                self.call.report_person("third_party")
-            logger.info("RULE third_party_line: %s", text[:120])
-            name = self.call.first_name
-            return caller_words.line(caller_words.THIRD_PARTY_LINE, lang, name=name), False
         return None, False
 
     def _line(self, lines, **values):
         return caller_words.line(lines, self.language.current, **values)
 
     def _promise_close(self, lines):
+        if self._talking_to_someone_else():  # "the link went to Sunita's number"
+            lines = (caller_words.PROMISE_CLOSE_SENT_TP if lines is caller_words.PROMISE_CLOSE_SENT
+                     else caller_words.PROMISE_CLOSE_DECLINED_TP)
         p = self.call.promise
         return self._line(lines, name=self.call.first_name, amount=f"{p['amount']:,}",
                           date=f"{p['date'].day} {p['date']:%B}")
@@ -206,8 +367,10 @@ class Collector(Agent):
             due = call.get_due_details()
             if "emi_amount" in due:
                 d = date.fromisoformat(due["due_date"])
-                return self._line(caller_words.DUE_QUESTION, amount=f"{due['emi_amount']:,}",
-                                  date=f"{d.day} {d:%B}")
+                lines = (caller_words.TP_DUE_QUESTION if self._talking_to_someone_else()
+                         else caller_words.DUE_QUESTION)
+                return self._line(lines, amount=f"{due['emi_amount']:,}",
+                                  date=f"{d.day} {d:%B}", name=call.first_name)
         return None  # the guard's usual fallback
 
     def _last_agent_text(self):
@@ -268,13 +431,16 @@ class Collector(Agent):
         # Every reply passes through ReplyGuard before it is spoken or saved.
         # "I'll try them later" is only for someone else. Before anyone is confirmed the
         # fallback asks who it is; a customer who still owes a DOB is asked for it.
+        someone_else = self.call.person_status == "third_party"
         guard = ReplyGuard(self.language.current, locked=not self.call.unlocked,
-                           third_party=self.call.person_status == "third_party",
-                           locked_fallback=(None if self.call.person_status == "third_party"
-                                            else self._step_line()),
+                           third_party=someone_else and not self.call.unlocked,
+                           locked_fallback=None if someone_else else self._step_line(),
                            greeted=True,  # the code spoke the greeting before any AI turn
                            step_fallback=self._step_line(),
-                           no_push=bool(self.call.push_stopped))
+                           no_push=bool(self.call.push_stopped),
+                           no_callback_talk=self.call.hardship == "with_date",
+                           third_person=(self.call.first_name if self._talking_to_someone_else()
+                                         else None))
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             if isinstance(chunk, str):
                 text = guard.feed(chunk)
@@ -317,41 +483,23 @@ class Collector(Agent):
                 the customer says they cannot talk right now. If you could not understand
                 their answer, don't call this yet. Ask once more first.
         """
+        if status == "third_party" and self.call.third_party is not None:
+            return {"ok": True, "duplicate": True, "next": "continue_the_conversation"}
+        was_unlocked = self.call.unlocked
         result = self._run("report_person", self.call.report_person, status)
         if result.get("next") == "confirm_identity_again":
             self._say(self._identity_question())
             raise StopResponse()
-        if result.get("next") == "ask_date_of_birth":
-            logger.info("RULE dob_question: spoken by code after report_person")
-            self._say(self._dob_question())
+        if status == "third_party" and result.get("ok"):
+            # the code runs the rest: relationship, consent, date of birth, a time to call
+            last = self.call.caller_lines[-1] if self.call.caller_lines else ""
+            line, hang_up = await self._flow_reply(self.flow.start(last, self.language.current))
+            self._say(line, hang_up)
             raise StopResponse()
-        return result
-
-    @function_tool()
-    async def verify_identity(self, context: RunContext, day: int, month: int, year: int) -> dict:
-        """Check the customer's date of birth. Only use this if a tool result tells you to
-        ask for it.
-
-        Args:
-            day: Day of the month, 1 to 31.
-            month: Month number, 1 to 12.
-            year: Full four-digit year, for example 1985. Ask again if only two digits.
-        """
-        result = self._run("verify_identity", self.call.verify_identity, day, month, year)
-        if result.get("locked"):
-            logger.info("RULE dob_failed_close: too many wrong dates of birth, ending the call")
-            self.call.transfer_to_human("identity_check_failed")
-            self.call.record_outcome_or_better("human_callback", "identity check failed")
-            self._say(self._line(caller_words.DOB_FAILED_CLOSE), hang_up=True)
-            raise StopResponse()
-        if result.get("next") == "ask_for_date_of_birth":
-            logger.info("RULE dob_question: caller has not said a date yet")
-            self._say(self._dob_question())
-            raise StopResponse()
-        if result.get("verified") is False and (
-                "attempts_left" in result or result.get("error") == "impossible_date"):
-            logger.info("RULE dob_retry: date of birth did not match, asking again")
-            self._say(self._line(caller_words.DOB_RETRY, name=self.call.first_name))
+        if result.get("next") == "give_reminder" and not was_unlocked:
+            logger.info("RULE reminder_by_code: after report_person")
+            line, hang_up = self._reminder()
+            self._say(line, hang_up)
             raise StopResponse()
         return result
 
@@ -371,6 +519,11 @@ class Collector(Agent):
         """
         result = self._run("send_payment_link", self.call.send_payment_link, channel)
         self._close_if_sent_after_promise(result)
+        if result.get("sent") and self._talking_to_someone_else():
+            logger.info("RULE link_to_customer_number: told the caller where the link went")
+            self._say(self._line(caller_words.TP_LINK_SENT, name=self.call.first_name,
+                                 digits=result["to_number_ending"]))
+            raise StopResponse()
         return result
 
     def _close_if_sent_after_promise(self, result):
@@ -437,7 +590,15 @@ class Collector(Agent):
             outcome: The label that best matches how the call ended.
             note: A few words of detail, never personal data.
         """
-        return self._run("record_outcome", self.call.record_outcome, outcome, note)
+        result = self._run("record_outcome", self.call.record_outcome, outcome, note)
+        if result.get("saved") and self.call.promise_recorded:
+            # the AI is about to say goodbye: the code says the promise close and hangs up
+            logger.info("RULE promise_close: outcome recorded after a promise, ending the call")
+            lines = (caller_words.PROMISE_CLOSE_SENT if self.call.link_sent_after_promise
+                     else caller_words.PROMISE_CLOSE_DECLINED)
+            self._say(self._promise_close(lines), hang_up=True)
+            raise StopResponse()
+        return result
 
     @function_tool()
     async def transfer_to_human(self, context: RunContext, reason: HandoffReason) -> dict:
@@ -450,17 +611,6 @@ class Collector(Agent):
                 customer_asked_for_person are accepted.
         """
         return self._run("transfer_to_human", self.call.transfer_to_human, reason)
-
-
-def say_when(when, language):
-    """"Monday 2 November, दोपहर 12 बजे" or "Monday 2 November at 12 pm"."""
-    clock = f"{when.hour % 12 or 12}" + (f":{when.minute:02d}" if when.minute else "")
-    day = f"{when:%A} {when.day} {when:%B}"
-    if language == "hi":
-        part = ("सुबह" if when.hour < 12 else "दोपहर" if when.hour < 16
-                else "शाम" if when.hour < 20 else "रात")
-        return f"{day}, {part} {clock} बजे"
-    return f"{day} at {clock} {'am' if when.hour < 12 else 'pm'}"
 
 
 def call_note(call, customer, kind, today):
@@ -488,6 +638,7 @@ def call_note(call, customer, kind, today):
 
 async def entrypoint(ctx: agents.JobContext):
     logger.info("database host: %s", urlparse(config.DATABASE_URL).hostname)
+    logger.info("STT_LANGUAGE=%s LLM_MODEL=%s", config.STT_LANGUAGE, config.LLM_MODEL)
     session_id = uuid.uuid4()
     started_at = datetime.now(timezone.utc)
     customer_id, kind = pick_target(ctx)

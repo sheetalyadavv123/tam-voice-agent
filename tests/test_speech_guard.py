@@ -366,3 +366,33 @@ def test_only_a_payment_ask_falls_back_to_the_step():
     g = ReplyGuard("hi", no_push=True, step_fallback="WHEN CAN A COLLEAGUE CALL?")
     g.feed("आप इसे कब pay कर पाएंगे? ")
     assert g.finish() == "WHEN CAN A COLLEAGUE CALL?"
+
+
+# ---- batch 4 combined ----
+
+@pytest.mark.parametrize("sentence,want", [
+    ("आपकी ₹2,200 की EMI 10 September को due थी।", "Sunita जी की ₹2,200 की EMI 10 September को due थी।"),
+    ("आपका loan active है।", "Sunita जी का loan active है।"),
+    ("Link आपके registered number पर गया है।", "Link Sunita जी के registered number पर गया है।"),
+    ("Your EMI is ₹2,200.", "Sunita's EMI is ₹2,200."),
+])
+def test_third_person_for_a_verified_relative(sentence, want):
+    assert ReplyGuard("hi", third_person="Sunita").feed(sentence + " ") == want + " "
+
+
+def test_second_person_is_kept_for_the_customer():
+    assert ReplyGuard("hi").feed("आपकी EMI pending है। ") == "आपकी EMI pending है। "
+
+
+@pytest.mark.parametrize("sentence", ["हमारी सहयोगी आपको वापस कॉल करेंगी।", "A colleague will call you back.",
+                                      "हम आपको बाद में कॉल करेंगे।"])
+def test_no_colleague_or_callback_after_a_hardship_promise(sentence):
+    g = ReplyGuard("hi", no_callback_talk=True)
+    assert g.feed(sentence + " ") == ""
+    assert g.events[0][0] == "callback_after_hardship_promise"
+
+
+@pytest.mark.parametrize("sentence", ["इससे prosecution हो सकता है।", "आपको summons आ सकता है।",
+                                      "कानूनी कार्रवाई हो सकती है।"])
+def test_new_threat_words_are_dropped(sentence):
+    assert clean_sentence(sentence) == ("", "threat")

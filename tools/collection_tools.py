@@ -80,6 +80,11 @@ class Call:
         # "hardship" or "dispute" once the customer reported one: no more asking for payment
         self.push_stopped = None
         self.callback_confirmed = None  # the time the colleague will call, once agreed
+        # Someone else answered: who they are and what they agreed to. "shared" is True
+        # once they passed the date-of-birth check and may hear about the account.
+        self.third_party = None
+        # "asked_date" (the code asked once for a date), "with_date" or "no_date"
+        self.hardship = None
 
     def heard(self, text):
         """The agent passes every finished caller message here."""
@@ -114,10 +119,20 @@ class Call:
 
     @property
     def unlocked(self):
-        """May we talk about the loan? Depends on VERIFICATION_MODE."""
-        if self.person_status != "customer":
-            return False
-        return (policy.VERIFICATION_MODE == "name_only" and not self.needs_dob) or self.dob_verified
+        """May we talk about the loan? The customer after a clear yes (and their date of
+        birth, if they first said they were someone else), or someone else who passed the
+        third-party check."""
+        if self.person_status == "third_party":
+            return bool(self.third_party and self.third_party.get("shared"))
+        return self.person_status == "customer" and (not self.needs_dob or self.dob_verified)
+
+    @property
+    def promised_by(self):
+        """"brother Rahul" when someone else made the promise, else None."""
+        tp = self.third_party
+        if self.person_status != "third_party" or not tp:
+            return None
+        return " ".join(x for x in (tp.get("relationship"), tp.get("name")) if x) or "someone else"
 
     def summary(self):
         return {
@@ -130,6 +145,9 @@ class Call:
             "promise_recorded": self.promise_recorded,
             "payment_confirmed": self.payment_confirmed,
             "callback_scheduled": self.callback_id is not None,
+            "third_party": self.third_party,
+            "hardship": self.hardship,
+            "promised_by": self.promise.get("by") if self.promise else None,
         }
 
     # ---- tool: who answered? ----
@@ -169,11 +187,11 @@ class Call:
             return {"ok": True, "next": "share_nothing_and_end_politely"}
         return {"ok": True, "next": "ask_when_to_call_back"}
 
-    # ---- tool: date of birth (only used in name_plus_dob mode) ----
+    # ---- date of birth: only for someone who first said they were someone else ----
     def verify_identity(self, day, month, year):
         if self.person_status != "customer":
             return {"error": "confirm_person_first"}
-        if policy.VERIFICATION_MODE == "name_only" and not self.needs_dob:
+        if not self.needs_dob:
             return {"verified": True, "not_required": True}
         if self.dob_verified:
             return {"verified": True}
@@ -182,19 +200,29 @@ class Call:
         if not caller_words.said_a_date(self.caller_lines):  # a guess would waste a try
             return {"verified": False, "reason": "caller_did_not_say_a_date",
                     "next": "ask_for_date_of_birth"}
+        result = self.check_dob(day, month, year)
+        if result["verified"]:
+            self.dob_verified = True
+            return {"verified": True, "next": "give_reminder", "due": self.get_due_details()}
+        if result.pop("locked", False):
+            return self._lock()
+        return result
+
+    def check_dob(self, day, month, year):
+        """Compare a date of birth with the customer's and count the try. The customer and
+        someone else share the limits. A date that can't exist doesn't use up a try."""
         real = self._real_date(day, month, year)
         if real is None:
             self.impossible_dates += 1
-            if self._locked():
-                return self._lock()
-            return {"verified": False, "error": "impossible_date", "next": "ask_full_date_again"}
-        self.dob_attempts += 1
-        if real.isoformat() == self._customer["dob"]:
-            self.dob_verified = True
-            return {"verified": True, "next": "give_reminder", "due": self.get_due_details()}
+            result = {"verified": False, "error": "impossible_date", "next": "ask_full_date_again"}
+        else:
+            self.dob_attempts += 1
+            if real.isoformat() == self._customer["dob"]:
+                return {"verified": True}
+            result = {"verified": False, "attempts_left": policy.MAX_DOB_ATTEMPTS - self.dob_attempts}
         if self._locked():
-            return self._lock()
-        return {"verified": False, "attempts_left": policy.MAX_DOB_ATTEMPTS - self.dob_attempts}
+            result["locked"] = True
+        return result
 
     def _locked(self):
         return (self.dob_attempts >= policy.MAX_DOB_ATTEMPTS
@@ -332,13 +360,18 @@ class Call:
             self.link_waiting = False
             nxt = "offer_human_callback" if check["reason"] == "too_far" else "ask_date_again"
             return {"saved": False, "reason": check["reason"], "next": nxt}
+        by = self.promised_by
         saved = self.store.add_promise(
-            self.customer_id, check["date"], loan["emi_amount"], self.session_id)
+            self.customer_id, check["date"], loan["emi_amount"], self.session_id,
+            note=f"promised by {by}" if by else None)
         for other in self.store.promises_for(self.customer_id, "open"):
             if other["id"] != saved["id"]:
                 self.store.set_promise_status(other["id"], "cancelled")
         self.promise_recorded = True
-        self.promise = {"date": check["date"], "amount": saved["amount"]}
+        self.promise = {"date": check["date"], "amount": saved["amount"], "by": by}
+        if by:
+            logger.info("RULE promise_by_third_party: promised by %s", by)
+            self.note = f"promised by {by}"[:200]
         if self.links_before_promise is None:
             self.links_before_promise = self.store.links_sent_in_session(self.session_id)
         d = check["date"]
@@ -373,8 +406,11 @@ class Call:
             self.callback_confirmed = due
             logger.info("RULE one_callback_per_handoff: colleague callback moved to %s", due.isoformat())
             return {"saved": True, "when": due.isoformat(), "updated": "colleague_callback"}
-        if self.callback_id is not None:  # a new time replaces the old one
-            self.store.set_callback_status(self.callback_id, "cancelled")
+        if self.callback_id is not None:  # a new time moves the callback already made
+            self.store.set_callback_due(self.callback_id, due)
+            self.callback_confirmed = due
+            logger.info("RULE one_callback: callback moved to %s", due.isoformat())
+            return {"saved": True, "when": due.isoformat(), "updated": "callback"}
         cb = self.store.add_callback(self.customer_id, due, reason, self.session_id)
         self.callback_id = cb["id"]
         self.callback_confirmed = due
@@ -442,9 +478,14 @@ class Call:
     def transfer_to_human(self, reason):
         if reason not in HANDOFF_REASONS:
             return {"requested": False, "error": "invalid_reason", "allowed": sorted(HANDOFF_REASONS)}
-        if self.person_status == "third_party":  # a colleague calls the customer, not them
+        if self.person_status == "third_party" and not self.unlocked:
+            # a colleague calls the customer, not whoever picked up
             return {"requested": False, "reason": "not_the_customer",
                     "next": "say_we_will_try_the_customer_again_later"}
+        if self.hardship == "with_date" and reason != "legal_question":
+            # hardship, but they gave a date: the promise closes the call, no colleague
+            return {"requested": False, "reason": "hardship_with_a_pay_date",
+                    "next": "record_promise_to_pay_and_close"}
         if reason == "customer_asked_for_person" and not caller_words.asks_for_person(self.caller_lines):
             return {"requested": False, "reason": "caller_did_not_ask_for_a_person",
                     "next": "continue_the_conversation"}
@@ -452,6 +493,11 @@ class Call:
             return {"requested": False, "reason": "promise_already_recorded",
                     "next": "remind_promise_date_and_close"}
         self.handoff_requested = True
+        if self.handoff_callback_id is None and self.callback_id is not None:
+            # a callback already made in this call becomes the colleague's call
+            self.handoff_callback_id = self.callback_id
+            self.store.set_callback_reason(self.callback_id, "human_followup")
+            logger.info("RULE one_callback_per_handoff: the call's callback goes to a colleague")
         if self.handoff_callback_id is None:
             due = rules.next_window_start(self.clock())
             cb = self.store.add_callback(self.customer_id, due, "human_followup", self.session_id)

@@ -27,6 +27,10 @@ runs each reply through clean_sentence before it reaches the voice.
   the call is at (step_fallback).
 - After hardship or a dispute (no_push), a sentence asking when or whether the
   customer will pay, or offering the link again, is dropped.
+- After hardship with a pay date (no_callback_talk), a sentence about a colleague or a
+  call back is dropped: the promise closes the call.
+- Talking to a verified relative (third_person), "आपकी EMI" becomes "Sunita जी की EMI"
+  and "your loan" becomes "Sunita's loan".
 - A reply is cut to MAX_SENTENCES.
 """
 import re
@@ -49,8 +53,9 @@ REPLACE = [
 
 DROP = {
     "threat": re.compile(
-        r"\b(?:police|court|legal|lawyer|lawsuit|jail|arrest|employer|neighbou?rs?)\b"
-        r"|पुलिस|कोर्ट|अदालत|कानूनी|क़ानूनी|वकील|जेल|गिरफ्तार|गिरफ़्तार|पड़ोसी",
+        r"\b(?:police|court|legal|lawyer|lawsuit|jail|arrest|employer|neighbou?rs?"
+        r"|prosecut\w*|summons?)\b"
+        r"|पुलिस|कोर्ट|अदालत|कानूनी|क़ानूनी|कार्रवाई|वकील|जेल|गिरफ्तार|गिरफ़्तार|पड़ोसी|समन",
         re.I),
     "secret": re.compile(
         r"\b(?:otp|pin|password|cvv|aadhaa?r|card number|bank details|account number)\b"
@@ -127,8 +132,23 @@ PAY_ASK = re.compile(
     r"|\bable\s+to\s+pay\b|\bdate\s+to\s+pay\b|\bpromise\s+(?:date|to\s+pay)\b"
     r"|(?:link|लिंक)\s*भेज\s*(?:दूँ|दूं|दें)|\bsend\s+you\s+(?:the|a)\s+(?:payment\s+)?link\b",
     re.I)
+# After hardship with a pay date the promise closes the call: no colleague, no callback
+CALLBACK_TALK = re.compile(
+    r"\b(?:call\s+(?:you\s+)?back|callback|call\s+you\s+(?:later|again|tomorrow))\b"
+    r"|वापस\s+कॉल|दोबारा\s+कॉल|फिर\s+से\s+कॉल|कॉल\s+बैक|बाद\s+में\s+कॉल", re.I)
 # Drops that the "carry on with the current step" fallback may replace
-STEP_DROPS = {"rewritten", "repeat_greeting", "pay_push"}
+STEP_DROPS = {"rewritten", "third_person", "repeat_greeting", "pay_push",
+              "callback_after_hardship_promise"}
+# Talking to someone else about the customer: "आपकी EMI" -> "Sunita जी की EMI"
+ACCOUNT_NOUNS = r"EMI|ईएमआई|loan|लोन|payment|पेमेंट|account|अकाउंट|किस्त"
+ACCOUNT_WORDS = r"(?:₹[\d,]+\s+(?:की|का)\s+)?(?:" + ACCOUNT_NOUNS + ")"
+THIRD_PERSON = [
+    (re.compile(r"(?<![ऀ-ॿ])आपकी(?=\s+" + ACCOUNT_WORDS + ")"), "{name} जी की"),
+    (re.compile(r"(?<![ऀ-ॿ])आपका(?=\s+" + ACCOUNT_WORDS + ")"), "{name} जी का"),
+    (re.compile(r"(?<![ऀ-ॿ])आपके(?=\s+(?:registered|रजिस्टर्ड|number|नंबर|" + ACCOUNT_NOUNS + "))"),
+     "{name} जी के"),
+    (re.compile(r"\byour(?=\s+(?:EMI|loan|payment|account|registered|number|due))", re.I), "{name}'s"),
+]
 
 
 def repeats_greeting(sentence: str) -> bool:
@@ -311,7 +331,8 @@ class ReplyGuard:
 
     def __init__(self, language: str, locked: bool = False, third_party: bool = False,
                  locked_fallback: str | None = None, greeted: bool = False,
-                 step_fallback: str | None = None, no_push: bool = False):
+                 step_fallback: str | None = None, no_push: bool = False,
+                 no_callback_talk: bool = False, third_person: str | None = None):
         self.language = language
         self.locked = locked
         self.third_party = third_party
@@ -322,6 +343,8 @@ class ReplyGuard:
         self.greeted = greeted
         self.step_fallback = step_fallback
         self.no_push = no_push  # hardship or dispute: never ask for payment again
+        self.no_callback_talk = no_callback_talk  # hardship with a date: no colleague, no callback
+        self.third_person = third_person  # the customer's name, when talking to someone else
         self.said_try_again = False
         self.buffer = ""
         self.spoken = 0
@@ -359,6 +382,16 @@ class ReplyGuard:
         if self.no_push and PAY_ASK.search(sentence):
             self.events.append(("pay_push", sentence))
             return ""
+        if self.no_callback_talk and (COLLEAGUE.search(sentence) or CALLBACK_TALK.search(sentence)):
+            self.events.append(("callback_after_hardship_promise", sentence))
+            return ""
+        if self.third_person:
+            spoken_about = sentence
+            for pattern, new in THIRD_PERSON:
+                spoken_about = pattern.sub(new.format(name=self.third_person), spoken_about)
+            if spoken_about != sentence:
+                self.events.append(("third_person", sentence))
+                sentence = spoken_about
         if self.third_party and COLLEAGUE.search(sentence):
             self.events.append(("colleague_for_third_party", sentence))
             if self.said_try_again:

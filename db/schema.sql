@@ -40,8 +40,11 @@ CREATE TABLE IF NOT EXISTS promises (
     amount INT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'kept', 'broken', 'cancelled')),
     session_id UUID,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    note TEXT  -- who promised, when not the customer: "promised by brother Rahul"
 );
+-- Older databases: db/migrations/002_promise_note.sql
+ALTER TABLE promises ADD COLUMN IF NOT EXISTS note TEXT;
 -- One open promise per customer. Older databases: db/migrations/001_one_open_promise.sql
 DROP INDEX IF EXISTS uq_open_promise;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_open_promise_per_customer

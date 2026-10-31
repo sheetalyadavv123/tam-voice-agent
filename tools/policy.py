@@ -4,9 +4,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# name_only: a "yes, speaking" unlocks the EMI reminder.
-# name_plus_dob: the caller must also pass the date-of-birth check.
-VERIFICATION_MODE = os.getenv("VERIFICATION_MODE", "name_only")
+# A clear "yes, speaking" from the customer unlocks the EMI reminder. Only someone who
+# first said they were someone else must pass the date-of-birth check.
+
+# When someone else answers: "none" shares nothing with them; "dob_verified" may talk to
+# them about the account once they agree and give the customer's date of birth.
+THIRD_PARTY_DISCLOSURE = os.getenv("THIRD_PARTY_DISCLOSURE") or "dob_verified"
+if THIRD_PARTY_DISCLOSURE not in ("none", "dob_verified"):
+    raise ValueError("THIRD_PARTY_DISCLOSURE must be none or dob_verified, "
+                     f"got {THIRD_PARTY_DISCLOSURE}")
 
 # Calling window in IST (24-hour clock). End hour is exclusive: 19 means before 7 pm.
 CALL_WINDOW_START = int(os.getenv("CALL_WINDOW_START", "8"))
