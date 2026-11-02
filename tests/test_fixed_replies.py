@@ -1024,6 +1024,112 @@ def test_a_relative_saying_bhai_still_gets_the_consent_question():
     assert session.said[-1] == says(caller_words.TP_CONSENT) and call.outcome is None
 
 
+# ---- batch 5 fix 2: "मैं उनको नहीं जानती" inside the flow ----
+
+THEM_FORMS = [
+    "मैं उनको नहीं जानती हूं", "उन्हें नहीं जानता", "मैं इनको नहीं जानते", "इन्हें नहीं जानती",
+    "इसको नहीं जानता", "उसको नहीं जानती", "उनको पता नहीं", "मैं उनको जानती ही नहीं",
+    "main unko nahi jaanti", "unhe nahi jaanta", "inko nahi jaante", "inhe nahi jaanti",
+    "isko nahi jaanta", "usko nahi jaanti", "unko pata nahi", "unko jaanta hi nahi",
+    "I don't know her", "I don't know him.", "I don't know them", "sorry, I don't know who that is"]
+NOT_THEM = ["unko pata hoga", "unse poochna padega", "उनको पता होगा", "उनसे पूछना पड़ेगा",
+            "I don't know her number", "I don't know when she'll pay", "haan main unko jaanta hoon"]
+
+
+@pytest.mark.parametrize("text", THEM_FORMS)
+def test_pronoun_forms_of_not_knowing_them(text):
+    assert caller_words.doesnt_know_them(text) is True
+
+
+@pytest.mark.parametrize("text", NOT_THEM)
+def test_she_would_know_or_ask_her_is_not_doesnt_know_them(text):
+    assert caller_words.doesnt_know_them(text) is False
+
+
+@pytest.mark.parametrize("text", ["unko pata hoga", "unse poochna padega", "उनको पता होगा", "उनसे पूछना पड़ेगा"])
+def test_she_would_know_or_ask_her_is_the_cant_commit_case(text):
+    assert caller_words.cant_commit(text) is True
+
+
+@pytest.mark.parametrize("text", THEM_FORMS)
+def test_pronoun_wrong_number_at_the_relationship_step(text):
+    agent, call, store, session = make_agent()
+    at_relationship_step(agent)
+    assert hear(agent, text) is True
+    wrong_number_ended(agent, call, store, session)
+
+
+@pytest.mark.parametrize("step", ["consent", "dob", "availability"])
+@pytest.mark.parametrize("text", ["मैं उनको नहीं जानती हूं", "unko jaanta hi nahi", "I don't know her"])
+def test_pronoun_wrong_number_at_later_steps(step, text, caplog):
+    agent, call, store, session = make_agent()
+    hear(agent, BROTHER)  # consent step
+    if step == "dob":
+        hear(agent, "haan bataiye")
+    if step == "availability":
+        hear(agent, "नहीं")
+    assert agent.flow.state == step
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, text) is True
+    wrong_number_ended(agent, call, store, session)
+    assert f"RULE wrong_number: at the {step} step (does not know them)" in caplog.text
+
+
+@pytest.mark.parametrize("text", ["unko pata hoga", "unse poochna padega"])
+def test_she_would_know_at_the_callback_time_step_asks_for_the_time_again(text):
+    agent, call, store, session = make_agent()
+    hear(agent, BROTHER)
+    hear(agent, "नहीं")  # nothing shared; when can we reach her?
+    assert hear(agent, text) is True
+    assert session.said[-1] == caller_words.TIME_INCOMPLETE["hi"]
+    assert call.outcome is None and session.closed is False
+
+
+@pytest.mark.parametrize("text", ["unko pata hoga", "unse poochna padega", "उनको पता होगा"])
+def test_verified_relative_saying_she_would_know_is_cant_commit(text):
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    assert hear(agent, text) is True
+    assert session.said[-1] == CANT_COMMIT_HI and call.outcome is None
+
+
+def test_verified_relative_is_never_a_pronoun_wrong_number():
+    # passed the DOB check, so they know her: "unko pata nahi" here is "she doesn't know"
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    hear(agent, "pata nahi")  # can't commit: when can we reach her?
+    assert hear(agent, "unko pata nahi") is True
+    assert call.outcome != "wrong_number"
+
+
+@pytest.mark.parametrize("text", ["main unko nahi jaanti", "I don't know her"])
+def test_pronoun_forms_at_the_greeting_are_not_a_wrong_number(text):
+    agent, call, store, session = make_agent()
+    hear(agent, text)
+    assert call.outcome != "wrong_number" and WRONG_HI not in session.said
+
+
+def test_kaun_at_the_greeting_still_gets_the_identity_question(monkeypatch):
+    agent, call, store, session = make_agent()
+    assert hear(agent, "kaun?") is False  # the AI's turn, as before
+    assert call.outcome is None
+    assert reply_to(agent, monkeypatch, GREETING_AGAIN) == CONFIRM_HI
+
+
+def test_console_transcript_unko_nahi_jaanti_at_the_relationship_step(caplog):
+    # Console: "मैं उनको नहीं जानती हूं" at the relationship question got the consent question
+    agent, call, store, session = make_agent()
+    assert hear(agent, "नहीं, आपकी बात सुनीता जी से नहीं हो रही.") is False  # the AI's turn
+    assert run_tool(agent, agent.report_person(None, "third_party")) == "stopped"
+    assert session.said == [says(caller_words.TP_RELATIONSHIP)]
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, "मैं उनको नहीं जानती हूं") is True
+    assert session.said == [says(caller_words.TP_RELATIONSHIP), WRONG_HI]
+    assert says(caller_words.TP_CONSENT) not in session.said
+    wrong_number_ended(agent, call, store, session)
+    assert "RULE wrong_number: at the relationship step (does not know them)" in caplog.text
+
+
 def test_ai_reporting_a_wrong_number_closes_with_the_apology():
     agent, call, store, session = make_agent()
     call.heard("main kisi Sunita ko nahi jaanta")

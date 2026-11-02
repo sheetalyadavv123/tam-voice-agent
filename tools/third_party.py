@@ -87,6 +87,10 @@ class ThirdPartyFlow:
         # every step: "मैं सुनीता को नहीं जानती" ends the call, whatever was asked
         if caller_words.wrong_number(text, self.call.first_name):
             return self._wrong_number(text, lang, state)
+        # we just asked about the customer, so "उनको"/"her" is them; someone who passed
+        # the DOB check knows them, so after that this is never a wrong number
+        if not (tp or {}).get("shared") and caller_words.doesnt_know_them(text):
+            return self._wrong_number(text, lang, state, "does not know them")
         if state == "relationship" and caller_words.no_relation(text):
             return self._wrong_number(text, lang, "relationship", "no relation")
         if (state != "claim_dob" and self.call.person_corrections == 0

@@ -289,6 +289,29 @@ NO_RELATION = re.compile(
     re.I)
 
 
+# Inside the third-party flow we've just asked about the customer, so "her"/"उनको" is
+# them: "मैं उनको नहीं जानती", "unko jaanta hi nahi", "I don't know her". Not at the
+# greeting. "unko pata hoga" (she'd know) and "unse poochna padega" are not this.
+_PRONOUN_HI = r"(?:उनको|उन्हें|उन्हे|उन्हीं\s+को|इनको|इन्हें|इन्हे|इसको|उसको)"
+_PRONOUN_EN = r"(?:unko|unhe|unhen|unhein|unhi\s+ko|inko|inhe|inhen|inhein|isko|usko)"
+DOESNT_KNOW_THEM = re.compile(
+    rf"{_PRONOUN_HI}\s+(?:(?:मैं|में)\s+)?(?:(?:बिल्कुल|बिलकुल)\s+)?(?:नहीं|नही)\s+(?:जान|पता)"
+    rf"|{_PRONOUN_HI}\s+(?:जान)\S*\s+(?:(?:ही|भी|तक)\s+)?(?:नहीं|नही)"
+    rf"|{_PRONOUN_HI}\s+(?:(?:का|के|की)\s+)?पता\s+(?:नहीं|नही)"
+    rf"|\b{_PRONOUN_EN}\s+(?:main\s+|mai\s+)?(?:bilkul\s+)?(?:nahi|nahin|nhi)\s+(?:jaan|jan|pata)"
+    rf"|\b{_PRONOUN_EN}\s+(?:jaan|jan)\w*\s+(?:(?:hi|bhi|tak)\s+)?(?:nahi|nahin|nhi)"
+    rf"|\b{_PRONOUN_EN}\s+pata\s+(?:nahi|nahin|nhi)"
+    r"|\b(?:don'?t|do\s+not)\s+know\s+(?:her|him|them)(?=\s*(?:[.?!,]|$|at\s+all))"
+    r"|\b(?:don'?t|do\s+not)\s+know\s+who\s+(?:that|this|she|he|they)\s+(?:is|are)\b",
+    re.I)
+
+
+def doesnt_know_them(text):
+    """"मैं उनको नहीं जानती हूं", "inko jaanta hi nahi", "I don't know her",
+    "don't know who that is". Only means a wrong number inside the third-party flow."""
+    return bool(DOESNT_KNOW_THEM.search(text or ""))
+
+
 def no_relation(text):
     """"कुछ भी नहीं", "कोई रिश्ता नहीं", "koi nahi", "no relation", "nobody": the whole
     answer to the relationship question says they aren't related to the customer."""
@@ -368,6 +391,8 @@ CANT_COMMIT = re.compile(
     r"|\b(?:don'?t|do\s+not)\s+know\b|\bnot\s+sure\b"
     r"|\b(?:nahi|nahin|nhi)\s+(?:bata|keh|kah)\s+sak"
     r"|\b(?:unse|unhi\s+se|unhise|un\s+se|usse|usi\s+se)\s+(?:hi\s+)?(?:pooch|puch|pouch)"
+    r"|\b(?:unko|unhe|unhi\s+ko|usko|inko)\s+(?:hi\s+)?pata\s+(?:hoga|hogi|hai)"
+    r"|(?:उनको|उन्हें|उन्हीं\s+को|उसको|इनको)\s+(?:ही\s+)?पता\s+(?:होगा|होगी|है)"
     r"|\b(?:wo|woh|vo|voh|wahi|vahi)\s+(?:hi\s+)?(?:batay|bataeng|bata\s+pay|bata\s+sak|decide|tay)"
     r"|\b(?:can'?t|cannot|can\s+not)\s+(?:say|tell|commit|promise)"
     r"|\b(?:she|he|they)(?:'ll|\s+will)\s+(?:decide|tell|let\s+you\s+know)"
