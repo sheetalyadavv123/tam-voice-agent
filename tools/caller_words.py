@@ -142,11 +142,22 @@ def confirms_identity(text, first_name):
         return False
     if other_name(text, first_name) or wrong_number(text, first_name):
         return False
-    if YES_FIRST.search(text) or I_AM.search(text):
+    if YES_FIRST.search(text) or IT_IS_ME.search(text):
+        return True
+    # a name close to the customer's but not it ("Amita" for Amit, "Muhammad" for
+    # Mohammed) only counts with a clear yes or "main hi": "Amita bol rahi hoon" is not one
+    if fuzzy_name_only(text, first_name):
+        return False
+    if I_AM.search(text):
         return True
     # the name alone: "Sunita", "सुनीता जी"; not "Sunita ghar pe nahi hai"
     talked_about = DECLINE.search(text) or CUSTOMER_AWAY.search(text)
-    return names.mentions(text, first_name) and not talked_about
+    return names.mentions_exactly(text, first_name) and not talked_about
+
+
+def fuzzy_name_only(text, first_name):
+    """The caller said a name a letter or two off the customer's, and not the name itself."""
+    return bool(first_name) and names.mentions_fuzzily(text or "", first_name)
 
 
 def offers_to_pay(lines):
@@ -585,6 +596,37 @@ HARDSHIP_CALLBACK = {
           "ठीक रहेगा?",
     "en": "That's all right. A colleague will talk to you about it. What day and time would "
           "suit you for their call?",
+}
+# ---- a day but no time. {day} like "Monday 9 November" ----
+TIME_FOR_DAY = {
+    "hi": "{day} को किस समय कॉल करना ठीक रहेगा?",
+    "en": "What time on {day} would suit?",
+}
+TP_CLOSE_DAY = {
+    "hi": "धन्यवाद। हम {name} जी को {day} को फिर से कॉल करेंगे। आपका दिन शुभ हो।",
+    "en": "Thank you. We'll call {name} again on {day}. Have a good day.",
+}
+HANDOFF_CLOSE_DAY = {
+    "hi": "ठीक है {name} जी, हमारी सहयोगी आपको {day} को कॉल करेंगी। धन्यवाद, अपना ध्यान रखिए।",
+    "en": "All right, {name}. Our colleague will call you on {day}. Thank you, take care.",
+}
+
+# ---- the customer asks to be called later ----
+CALL_LATER_ASK = {
+    "hi": "कोई बात नहीं। आपको किस दिन और किस समय कॉल करें?",
+    "en": "No problem. What day and time should we call you?",
+}
+CALL_LATER_CLOSE = {
+    "hi": "ठीक है {name} जी, हम आपको {when} कॉल करेंगे। धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right, {name}. We'll call you on {when}. Thank you, have a good day.",
+}
+CALL_LATER_CLOSE_DAY = {
+    "hi": "ठीक है {name} जी, हम आपको {day} को कॉल करेंगे। धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right, {name}. We'll call you on {day}. Thank you, have a good day.",
+}
+CALL_LATER_CLOSE_NO_TIME = {
+    "hi": "ठीक है {name} जी, हम आपको बाद में फिर से कॉल करेंगे। धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right, {name}. We'll call you again later. Thank you, have a good day.",
 }
 HANDOFF_CLOSE_NO_TIME = {
     "hi": "ठीक है {name} जी, हमारी सहयोगी आपसे जल्द संपर्क करेंगी। धन्यवाद, अपना ध्यान रखिए।",

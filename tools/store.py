@@ -174,10 +174,11 @@ class MemoryStore:
         return None
 
     # ---- callbacks ----
-    def add_callback(self, customer_id, due_at, reason, session_id=None):
+    def add_callback(self, customer_id, due_at, reason, session_id=None, note=None):
+        """note: why the callback has this time, like "caller gave day only"."""
         cb = {"id": self._next_id("callback"), "customer_id": customer_id, "due_at": due_at,
               "reason": reason, "status": "open", "session_id": session_id,
-              "created_at": self._clock()}
+              "created_at": self._clock(), "note": note}
         self._callbacks.append(cb)
         return dict(cb)
 
@@ -201,11 +202,13 @@ class MemoryStore:
                 return dict(c)
         return None
 
-    def set_callback_due(self, callback_id, due_at):
-        """Move a callback made in this call to a new time. (A callback loaded from the
-        database keeps its saved time: PostgresStore only saves status changes.)"""
+    def set_callback_due(self, callback_id, due_at, note=None):
+        """Move a callback made in this call to a new time, with the note for that time.
+        (A callback loaded from the database keeps its saved time: PostgresStore only
+        saves status changes.)"""
         for c in self._callbacks:
             if c["id"] == callback_id:
                 c["due_at"] = due_at
+                c["note"] = note
                 return dict(c)
         return None

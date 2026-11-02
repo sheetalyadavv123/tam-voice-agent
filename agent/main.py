@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal  # noqa: F401  (kept for tool signatures)
 from urllib.parse import urlparse
 
+import asyncpg
 # Let this file import the "tools" folder in the project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -23,9 +24,11 @@ from livekit.plugins import (
 
 import config
 import db
-from tools import caller_words, dates, rules, spoken
+from tools import caller_words, dates, rules, schema_check
+from tools.call_later import CallLaterFlow, asks_call_later
+from tools.callback_ask import TimeAsk, book, say_day
 from tools.collection_tools import (
-    AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
+    DAY_ONLY_NOTE, AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
 )
 from tools.dates import say_when
 from tools.language import LanguageTracker, turn_language
@@ -67,6 +70,40 @@ def build_tts():
     return elevenlabs.TTS(model=config.TTS_MODEL, voice_id=config.TTS_VOICE_ID)
 
 
+_schema_ok = False  # set once a check passed in this process; a mismatch is checked again
+
+
+async def check_schema():
+    """True when the database has every table and column the code needs, False (and
+    "SCHEMA MISMATCH: ..." at ERROR) when it doesn't, None when it couldn't be checked
+    (no database, or it can't be reached: build_store handles that)."""
+    global _schema_ok
+    if _schema_ok or not config.DATABASE_URL:
+        return True if _schema_ok else None
+    try:
+        conn = await asyncio.wait_for(asyncpg.connect(config.DATABASE_URL), timeout=15)
+        try:
+            result = await schema_check.check(conn)
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.warning("schema check skipped: could not reach the database (%s)", type(e).__name__)
+        return None
+    if result["missing"]:
+        logger.error(schema_check.message(result))
+        return False
+    _schema_ok = True
+    return True
+
+
+def schema_gate(ok, test_mode):
+    """What a call does after the schema check: "refuse" (TEST_MODE off and a mismatch),
+    "memory" (TEST_MODE on and a mismatch: in-memory data, nothing saved) or "go"."""
+    if ok is False:
+        return "memory" if test_mode else "refuse"
+    return "go"
+
+
 async def build_store(customer_id):
     """Returns (store, persistent). store is None when we must not place the call."""
     if config.DATABASE_URL:
@@ -103,6 +140,8 @@ class Collector(Agent):
         self.silences = 0  # times in a row the caller went quiet
         self.identity_asks = 0  # "Okay" at the greeting: the code asks again, twice at most
         self.time_misses = 0  # hardship callback: answers without a usable time
+        self.time_ask = TimeAsk(call.clock)  # hardship callback: a day without a time
+        self.later = CallLaterFlow(call)  # the customer asks to be called later
         self._end_task = None
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
@@ -174,6 +213,9 @@ class Collector(Agent):
         call = self.call
         if self.flow.active:
             return await self._flow_reply(self.flow.hear(text, self.language.current))
+        if self.later.active:
+            reply = self.later.hear(text, self.language.current)
+            return reply.line, reply.hang_up
         if call.person_status is None:
             reply = await self._identity_reply(text)
             if reply[0] or call.person_status is None:
@@ -187,7 +229,21 @@ class Collector(Agent):
         line = self._cant_commit_reply(text)
         if line:
             return line, False
+        line, hang_up = self._call_later_reply(text)
+        if line:
+            return line, hang_up
         return self._colleague_time_reply(text)
+
+    def _call_later_reply(self, text):
+        """The customer (not someone else) asks to be called later, before any promise and
+        outside hardship or a dispute: the code asks for a day and time and books it."""
+        call = self.call
+        if (call.person_status not in ("customer", "unavailable") or call.promise_recorded
+                or call.push_stopped or call.hardship is not None or self.later.active
+                or call.callback_id is not None or not asks_call_later(text)):
+            return None, False
+        reply = self.later.start(text, self.language.current)
+        return reply.line, reply.hang_up
 
     def _cant_commit_reply(self, text):
         """A verified relative who can't say when the customer will pay ("pata nahi, unse
@@ -211,8 +267,22 @@ class Collector(Agent):
             self.identity_asks += 1
             logger.info("RULE identity_not_confirmed: %r, asking again", text[:60])
             return self._identity_question(), False
-        if not caller_words.confirms_identity(text, name) or caller_words.busy(text):
-            return None, False  # a question, or "haan, par abhi busy hoon": the AI answers
+        confirmed = caller_words.confirms_identity(text, name)
+        if not confirmed and caller_words.fuzzy_name_only(text, name) and self.identity_asks < 2:
+            # "Amita bol rahi hoon" for Amit: a close name alone doesn't unlock the call
+            self.identity_asks += 1
+            logger.info("RULE identity_fuzzy_name: %r is close to %s but not the name, asking again",
+                        text[:60], name)
+            return self._identity_question(), False
+        if not confirmed:
+            return None, False  # a question: the AI answers
+        if asks_call_later(text):  # "haan, par abhi busy hoon": when should we call?
+            call.report_person("unavailable")
+            logger.info("RULE identity_busy: %r, the customer asks to be called later", text[:60])
+            reply = self.later.start(text, self.language.current)
+            return reply.line, reply.hang_up
+        if caller_words.busy(text):
+            return None, False  # "haan, busy hoon, Friday tak pay kar dunga": the AI answers
         call.report_person("customer")
         logger.info("RULE identity_confirmed_by_code: %r", text[:60])
         await self._add_note("who", f"# Who\nThe caller confirmed they are {name}. The code "
@@ -304,15 +374,18 @@ class Collector(Agent):
         if not call.push_stopped or call.callback_confirmed:
             return None, False
         strict = call.hardship == "no_date"
-        if strict and DONT_KNOW.search(text):
+        if strict and DONT_KNOW.search(text) and not self.time_ask.waiting:
             return self._handoff_close(None)
-        said = spoken.callback_time(text, call.clock())
+        said = self.time_ask.read(text)  # "kal" alone: asked once for the time, then the default hour
+        if "ask_time" in said:
+            logger.info("RULE callback_time_ask: day %s given without a time, asking once",
+                        said["ask_time"])
+            return self._line(caller_words.TIME_FOR_DAY, day=say_day(said["ask_time"])), False
         if "when" in said:
-            w = said["when"]
-            result = self._run("schedule_callback", call.schedule_callback, w.day, w.month,
-                               w.year, w.hour, w.minute, "customer_requested")
+            w, day_only = said["when"], said.get("day_only", False)
+            result = self._run("schedule_callback", book, call, said, "customer_requested")
             if result.get("saved"):
-                return self._handoff_close(w)
+                return self._handoff_close(w, day_only)
         elif not strict:
             return None, False
         self.time_misses += 1
@@ -322,10 +395,16 @@ class Collector(Agent):
             return time_outside_line(self.language.current), False
         return self._line(caller_words.TIME_INCOMPLETE), False
 
-    def _handoff_close(self, when):
+    def _handoff_close(self, when, day_only=False):
         if when is None:
             logger.info("RULE handoff_close: no time given, colleague calls at the next window")
             return self._line(caller_words.HANDOFF_CLOSE_NO_TIME, name=self.call.first_name), True
+        if day_only:
+            self.call.note = (self.call.note + "; " if self.call.note else "") + DAY_ONLY_NOTE
+            logger.info("RULE handoff_close: colleague callback on %s (day only), ending the call",
+                        when.date().isoformat())
+            return self._line(caller_words.HANDOFF_CLOSE_DAY, name=self.call.first_name,
+                              day=say_day(when)), True
         logger.info("RULE handoff_close: colleague callback at %s, ending the call", when.isoformat())
         return self._line(caller_words.HANDOFF_CLOSE, name=self.call.first_name,
                           when=say_when(when, self.language.current)), True
@@ -511,6 +590,12 @@ class Collector(Agent):
             line, hang_up = await self._flow_reply(self.flow.start(last, self.language.current))
             self._say(line, hang_up)
             raise StopResponse()
+        if status == "unavailable" and result.get("ok") and not self.later.active:
+            # the code asks when to call, books it and closes
+            last = self.call.caller_lines[-1] if self.call.caller_lines else ""
+            reply = self.later.start(last, self.language.current)
+            self._say(reply.line, reply.hang_up)
+            raise StopResponse()
         if result.get("next") == "give_reminder" and not was_unlocked:
             logger.info("RULE reminder_by_code: after report_person")
             line, hang_up = self._reminder()
@@ -658,7 +743,17 @@ async def entrypoint(ctx: agents.JobContext):
     started_at = datetime.now(timezone.utc)
     customer_id, kind = pick_target(ctx)
 
-    store, persistent = await build_store(customer_id)
+    gate = schema_gate(await check_schema(), config.TEST_MODE)
+    if gate == "refuse":
+        logger.error("refusing the call: the database is missing columns the code needs "
+                     "(see SCHEMA MISMATCH above); run the pending migrations")
+        return
+    if gate == "memory":
+        logger.warning("TEST_MODE is on: using in-memory data because of the SCHEMA MISMATCH; "
+                       "nothing from this call is saved to the database")
+        store, persistent = MemoryStore.from_files(clock=rules.now_ist), False
+    else:
+        store, persistent = await build_store(customer_id)
     if store is None:
         logger.error("database unavailable: not placing the call")
         return
@@ -717,6 +812,13 @@ async def entrypoint(ctx: agents.JobContext):
                     encoding="utf-8")
         turns = db.extract_turns(session.history)
         if not turns:
+            return
+        if gate == "memory":  # the database doesn't match the code: transcript to a file
+            TRANSCRIPT_DIR.mkdir(exist_ok=True)
+            payload = [{**t, "created_at": t["created_at"].isoformat()} for t in turns]
+            (TRANSCRIPT_DIR / f"{session_id}.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("saved call %s to %s (schema mismatch)", session_id, TRANSCRIPT_DIR)
             return
         try:
             await db.save_call(session_id, ctx.room.name, "agent", started_at, ended_at,
@@ -778,5 +880,28 @@ async def entrypoint(ctx: agents.JobContext):
     await session.say(greeting)
 
 
+TAKES_CALLS = {"start", "dev", "console", "connect"}  # not "download-files" (Docker build)
+
+
+def startup_schema_check(argv):
+    """Before the worker starts: with TEST_MODE off, a database that is missing columns
+    means no worker at all (exit code 1), so no call is ever taken. Returns the exit code
+    or None to carry on."""
+    if len(argv) < 2 or argv[1] not in TAKES_CALLS:
+        return None
+    ok = asyncio.run(check_schema())  # logs "SCHEMA MISMATCH: ..." at ERROR
+    if ok is False:
+        if not config.TEST_MODE:
+            logger.error("refusing to take calls: run the pending migrations "
+                         "(README, Deploying) and start the agent again")
+            return 1
+        logger.error("TEST_MODE is on: calls will use in-memory data, and the mismatch is "
+                     "logged on every call")
+    return None
+
+
 if __name__ == "__main__":
+    code = startup_schema_check(sys.argv)
+    if code is not None:
+        sys.exit(code)
     agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))

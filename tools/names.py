@@ -78,11 +78,52 @@ def allowed(name_key: str) -> int:
     return 2 if len(name_key) >= 8 else 1 if len(name_key) >= 4 else 0
 
 
+def _vowel_key(k: str) -> str:
+    """"e" and "a" folded together: Devanagari's inherent vowel is written either way in
+    Roman letters ("मोहम्मद" -> "mohamad", "Mohammed" -> "mohamed")."""
+    return re.sub(r"(.)\1+", r"\1", k.replace("e", "a"))
+
+
+def exact_key(word: str) -> str:
+    """The key with the spellings of one name made equal: e/a as above, and y/i
+    ("Subramanyam", "Subramaniam"; "Priya", "Pria")."""
+    return re.sub(r"(.)\1+", r"\1", _vowel_key(key(word)).replace("y", "i"))
+
+
+def exact_name(word: str, name: str) -> bool:
+    """The same name, only spelled or written differently: "Sunita", "Suneeta", "सुनीता",
+    "Mohammad"/"मोहम्मद" for Mohammed. Not "Amita" for Amit or "Muhammad" for Mohammed."""
+    a, b = exact_key(word), exact_key(name)
+    return bool(a and b) and a == b
+
+
 def same_name(word: str, name: str) -> bool:
+    """The name or one close to it (exact_name, or a letter or two off)."""
     a, b = key(word), key(name)
-    return bool(a and b) and distance(a, b) <= allowed(b)
+    if not (a and b):
+        return False
+    if exact_name(word, name) or distance(a, b) <= allowed(b):
+        return True
+    # long names may also differ by a/e on top ("Muhammad" for Mohammed); for short ones
+    # that would let in words like "suniye" (Sunita) and "nahi" (Neha)
+    return len(b) >= 7 and distance(_vowel_key(a), _vowel_key(b)) <= allowed(b)
+
+
+def fuzzy_name(word: str, name: str) -> bool:
+    """Close to the name but not it: "Amita" for Amit, "Muhammad" for Mohammed."""
+    return same_name(word, name) and not exact_name(word, name)
 
 
 def mentions(text: str, name: str) -> bool:
     """Does the text contain the name, spelled any of the ways above?"""
     return any(same_name(w, name) for w in WORD.findall(text or ""))
+
+
+def mentions_exactly(text: str, name: str) -> bool:
+    """Does the text contain the name itself, in any spelling or script (exact_name)?"""
+    return any(exact_name(w, name) for w in WORD.findall(text or ""))
+
+
+def mentions_fuzzily(text: str, name: str) -> bool:
+    """A word close to the name but not the name, and not the name itself as well."""
+    return mentions(text, name) and not mentions_exactly(text, name)

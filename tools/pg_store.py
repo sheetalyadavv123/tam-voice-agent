@@ -70,7 +70,7 @@ class PostgresStore(MemoryStore):
                 "SELECT id, customer_id, promised_date, amount, status, session_id, created_at "
                 f"FROM promises WHERE status = 'open' AND {_FILTER}", ids)
             callbacks = await conn.fetch(
-                "SELECT id, customer_id, due_at, reason, status, session_id, created_at "
+                "SELECT id, customer_id, due_at, reason, status, session_id, created_at, note "
                 f"FROM callbacks WHERE status = 'open' AND {_FILTER}", ids)
             links = await conn.fetch(
                 "SELECT DISTINCT ON (customer_id) id, customer_id, amount, url, channel, status, "
@@ -142,10 +142,10 @@ class PostgresStore(MemoryStore):
                         _uuid_or_none(p["session_id"]), p["created_at"], p.get("note"))
                 for c in ch["new_callbacks"]:
                     await conn.execute(
-                        "INSERT INTO callbacks (customer_id, due_at, reason, status, session_id, created_at) "
-                        "VALUES ($1, $2, $3, $4, $5, $6)",
+                        "INSERT INTO callbacks (customer_id, due_at, reason, status, session_id, "
+                        "created_at, note) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                         c["customer_id"], c["due_at"], c["reason"], c["status"],
-                        _uuid_or_none(c["session_id"]), c["created_at"])
+                        _uuid_or_none(c["session_id"]), c["created_at"], c.get("note"))
                 for l in ch["new_links"]:
                     await conn.execute(
                         "INSERT INTO payment_links (id, customer_id, amount, url, channel, status, "
