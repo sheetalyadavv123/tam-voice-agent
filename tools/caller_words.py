@@ -263,6 +263,9 @@ DOES_NOT_KNOW_CUSTOMER = re.compile(
     rf"|\bwho(?:'?s|\s+is)\s+{NAME_MARK}"
     rf"|\bkisi\s+{NAME_MARK}|किसी\s+{NAME_MARK}"
     rf"|{NAME_MARK}\s+(?:ko|को)\s+(?:main\s+|mai\s+|मैं\s+)?(?:nahi|nahin|nhi|नहीं|नही)\s+(?:jaan|jan|जान)"
+    # "सुनीता को जानती ही नहीं", "Sunita ko jaanti hi nahi", "Sunita ko jaanta tak nahi"
+    rf"|{NAME_MARK}\s+(?:ko|को)\s+(?:jaan|jan|जान)\S*\s+(?:(?:hi|bhi|tak|ही|भी|तक)\s+)?"
+    rf"(?:nahi|nahin|nhi|नहीं|नही)"
     rf"|\b(?:yahan|yahaan|idhar)\s+koi\s+{NAME_MARK}|(?:यहाँ|यहां|इधर)\s+कोई\s+{NAME_MARK}"
     rf"|\bkoi\s+{NAME_MARK}\s+(?:nahi|nahin|nhi)|कोई\s+{NAME_MARK}\s+(?:नहीं|नही)"
     rf"|\b(?:don'?t|do\s+not)\s+know\s+(?:any(?:one|body)?\s+)?(?:(?:named|called)\s+|by\s+the\s+name\s+)?{NAME_MARK}"
@@ -275,6 +278,21 @@ def _mark_name(text, first_name):
     """The text with every spelling of the customer's name replaced by NAME_MARK."""
     return names.WORD.sub(
         lambda m: NAME_MARK if names.same_name(m.group(0), first_name) else m.group(0), text)
+
+
+# The answer to "how are you related to Sunita?" is: not at all
+NO_RELATION = re.compile(
+    r"^\W*(?:(?:kuch|kuchh)\s+(?:bhi\s+)?(?:nahi|nahin|nhi)|koi\s+(?:bhi\s+)?(?:rishta\s+|relation\s+)?(?:nahi|nahin|nhi)"
+    r"|no\s+relation(?:ship)?|not\s+related|(?:i'?m\s+|i\s+am\s+)?nobody|no\s*one|none"
+    r"|कुछ\s+(?:भी\s+)?(?:नहीं|नही)|कोई\s+(?:भी\s+)?(?:रिश्ता\s+)?(?:नहीं|नही))"
+    r"(?:\s+(?:hai|hain|h|लगता|लगती|लगते|है|हैं|hoon|हूँ|हूं|lagta|lagti|lagte))*\W*$",
+    re.I)
+
+
+def no_relation(text):
+    """"कुछ भी नहीं", "कोई रिश्ता नहीं", "koi nahi", "no relation", "nobody": the whole
+    answer to the relationship question says they aren't related to the customer."""
+    return bool(NO_RELATION.search(text or ""))
 
 
 def wrong_number(text, first_name=None):

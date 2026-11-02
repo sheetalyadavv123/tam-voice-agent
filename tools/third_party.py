@@ -58,10 +58,7 @@ class ThirdPartyFlow:
         call = self.call
         if caller_words.wrong_number(text, call.first_name):
             call.report_person("third_party")
-            call.record_outcome("wrong_number", "caller does not know the customer")
-            self.state = "done"
-            logger.info("RULE wrong_number: %r", text[:60])
-            return Reply(self._line(caller_words.WRONG_NUMBER_CLOSE, lang), hang_up=True)
+            return self._wrong_number(text, lang, "greeting")
         call.report_person("third_party")
         call.third_party = {
             "mode": policy.THIRD_PARTY_DISCLOSURE,
@@ -78,8 +75,20 @@ class ThirdPartyFlow:
         self.state = "relationship"
         return Reply(prefix + self._line(caller_words.TP_RELATIONSHIP, lang))
 
+    def _wrong_number(self, text, lang, step, why="does not know the customer"):
+        """Whoever answered doesn't know the customer: apologise and end the call."""
+        self.state = "done"
+        self.call.record_outcome("wrong_number", "caller does not know the customer")
+        logger.info("RULE wrong_number: at the %s step (%s), %r", step, why, text[:60])
+        return Reply(self._line(caller_words.WRONG_NUMBER_CLOSE, lang), hang_up=True)
+
     def hear(self, text, lang):
         tp, state = self.call.third_party, self.state
+        # every step: "मैं सुनीता को नहीं जानती" ends the call, whatever was asked
+        if caller_words.wrong_number(text, self.call.first_name):
+            return self._wrong_number(text, lang, state)
+        if state == "relationship" and caller_words.no_relation(text):
+            return self._wrong_number(text, lang, "relationship", "no relation")
         if (state != "claim_dob" and self.call.person_corrections == 0
                 and caller_words.claims_to_be_customer(text, self.call.first_name)):
             return self._claim(lang)
