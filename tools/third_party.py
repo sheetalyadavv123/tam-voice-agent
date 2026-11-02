@@ -40,6 +40,7 @@ class ThirdPartyFlow:
         self.state = None
         self.unclear = 0
         self.time_misses = 0
+        self.couldnt_commit = False  # verified, but couldn't say when the customer will pay
 
     @property
     def active(self):
@@ -55,9 +56,9 @@ class ThirdPartyFlow:
     # ---- the person who answered said they are someone else ----
     def start(self, text, lang):
         call = self.call
-        if caller_words.wrong_number(text):
+        if caller_words.wrong_number(text, call.first_name):
             call.report_person("third_party")
-            call.record_outcome("wrong_number")
+            call.record_outcome("wrong_number", "caller does not know the customer")
             self.state = "done"
             logger.info("RULE wrong_number: %r", text[:60])
             return Reply(self._line(caller_words.WRONG_NUMBER_CLOSE, lang), hang_up=True)
@@ -169,6 +170,16 @@ class ThirdPartyFlow:
         retry = caller_words.DOB_RETRY if claim else caller_words.TP_DOB_RETRY
         return Reply(self._line(retry, lang))
 
+    # ---- verified, heard the reminder, but can't say when the customer will pay ----
+    def cant_commit(self, text, lang):
+        """"Pata nahi, unse hi poochna padega": no promise, the code asks when to reach the
+        customer and the answer is read like any other availability answer."""
+        self.couldnt_commit = True
+        self.state = "availability"
+        logger.info("RULE third_party_cant_commit: %r, asking when to reach %s",
+                    text[:60], self.call.first_name)
+        return Reply(self._line(caller_words.TP_CANT_COMMIT, lang))
+
     # ---- when can we reach the customer? ----
     def _availability(self, text, lang):
         call = self.call
@@ -195,7 +206,12 @@ class ThirdPartyFlow:
 
     def _close(self, lang, when=None):
         self.state = "done"
-        self.call.record_outcome("third_party")
+        note = ""
+        if self.couldnt_commit:
+            note = "relative could not commit, " + ("callback booked" if when else "no time given")
+        self.call.record_outcome("third_party", note)
+        logger.info("RULE third_party_close: %s", "callback at " + when.isoformat() if when
+                    else "no time given")
         self._log_disclosure()
         if when is not None:
             return Reply(self._line(caller_words.TP_CLOSE_TIME, lang, when=say_when(when, lang)),

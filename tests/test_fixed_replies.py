@@ -764,3 +764,145 @@ def test_outcome_without_a_promise_goes_back_to_the_ai():
     confirmed(call)
     assert run_tool(agent, agent.record_outcome(None, "no_resolution"))["saved"] is True
     assert session.said == [] and session.closed is False
+
+
+# ---- batch 5, rule 1: a verified relative can't commit to a pay date ----
+
+CANT_COMMIT_HI = "ठीक है, कोई बात नहीं। Sunita जी से किस दिन और किस समय बात हो सकती है?"
+
+
+@pytest.mark.parametrize("text", [
+    "pata nahi, unse hi poochna padega", "mujhe nahi pata", "main nahi bata sakta",
+    "unse poochna padega", "wo hi batayenge", "मुझे नहीं पता", "वो ही बताएंगी",
+    "I can't say", "I don't know", "she'll decide"])
+def test_verified_relative_who_cant_commit_is_asked_when_to_reach_her(text, caplog):
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, text) is True  # the AI doesn't get the turn
+    assert session.said[-1] == CANT_COMMIT_HI and session.closed is False
+    assert "RULE third_party_cant_commit" in caplog.text
+
+
+def test_relative_cant_commit_then_a_time_books_the_callback_and_closes(caplog):
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        hear(agent, "pata nahi, unse hi poochna padega")
+        assert hear(agent, "kal shaam 6 baje") is True
+    assert session.said[-1] == says(caller_words.TP_CLOSE_TIME, when="Thursday 29 October, शाम 6 बजे")
+    assert session.closed is True
+    cbs = store.callbacks_due(FAR)
+    assert [(c["reason"], c["due_at"]) for c in cbs] == [
+        ("customer_unavailable", datetime(2026, 10, 29, 18, 0, tzinfo=IST))]
+    assert store.promises_for("C002") == [] and store.latest_link("C002") is None
+    assert call.outcome == "third_party" and call.note == "relative could not commit, callback booked"
+    meta = call.summary()
+    assert meta["third_party"]["relationship"] == "brother" and meta["note"] == call.note
+    assert meta["callback_scheduled"] is True and meta["promise_recorded"] is False
+    assert "RULE third_party_close: callback at 2026-10-29T18:00:00+05:30" in caplog.text
+
+
+def test_relative_cant_commit_and_no_time_closes_without_a_callback():
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    hear(agent, "main nahi bata sakta")
+    assert hear(agent, "pata nahi") is True
+    assert session.said[-1] == says(caller_words.TP_CLOSE) and session.closed is True
+    assert store.callbacks_due(FAR) == [] and store.promises_for("C002") == []
+    assert call.outcome == "third_party" and call.note == "relative could not commit, no time given"
+
+
+def test_relative_cant_commit_unclear_time_is_asked_again_then_closes():
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    hear(agent, "unse poochna padega")
+    hear(agent, "kal")  # a day without a time
+    assert session.said[-1] == caller_words.TIME_INCOMPLETE["hi"] and session.closed is False
+    hear(agent, "dekhte hain")
+    assert session.said[-1] == says(caller_words.TP_CLOSE) and session.closed is True
+    assert call.note == "relative could not commit, no time given"
+
+
+def test_relative_cant_commit_time_outside_hours_is_asked_again():
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    hear(agent, "pata nahi")
+    hear(agent, "kal raat 10 baje")
+    assert session.said[-1] == main.time_outside_line("hi") and store.callbacks_due(FAR) == []
+    hear(agent, "kal subah 10 baje")
+    assert session.closed is True and len(store.callbacks_due(FAR)) == 1
+
+
+def test_relative_cant_commit_in_english():
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    agent.language.current = "en"
+    hear(agent, "I can't say, she'll decide")
+    assert session.said[-1] == "That's all right. What day and time would be good to speak with Sunita?"
+
+
+def test_relative_who_names_a_day_goes_to_the_ai():
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    assert hear(agent, "pata nahi, shayad Friday tak") is False
+    assert agent.flow.couldnt_commit is False
+
+
+def test_customer_saying_pata_nahi_is_not_this_rule():
+    agent, call, store, session = make_agent()
+    confirmed(call)
+    assert hear(agent, "pata nahi") is False
+    assert agent.flow.couldnt_commit is False and session.said == []
+
+
+def test_relative_after_a_promise_is_not_this_rule():
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    call.heard("Friday tak")
+    assert call.record_promise_to_pay(30, 10, 2026)["saved"] is True
+    assert hear(agent, "baaki pata nahi") is False
+
+
+# ---- batch 5, rule 2: wrong number at the greeting ----
+
+@pytest.mark.parametrize("text", [
+    "kaun Sunita? Main kisi Sunita ko nahi jaanta", "kaun Suneeta?", "Sunita kaun hai?",
+    "main kisi Sunita ko nahi jaanta", "yahan koi Sunita nahi hai", "यहाँ कोई सुनीता नहीं है",
+    "कौन सुनीता?", "I don't know any Sunita", "who is Sunita?", "wrong number", "galat number hai"])
+def test_caller_who_doesnt_know_the_customer_is_a_wrong_number(text, caplog):
+    agent, call, store, session = make_agent()
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, text) is True
+    assert session.said == [caller_words.WRONG_NUMBER_CLOSE["hi"]] and session.closed is True
+    assert call.outcome == "wrong_number" and call.unlocked is False
+    assert store.callbacks_due(FAR) == [] and store.promises_for("C002") == []
+    assert store.latest_link("C002") is None and call.third_party is None
+    assert "RULE wrong_number" in caplog.text
+
+
+@pytest.mark.parametrize("text", [
+    "haan, Sunita bol rahi hoon, aap kaun?", "Sunita, kaun bol raha hai?", "ji, Sunita. Kaun?",
+    "Sunita ghar pe nahi hai", "who is calling?"])
+def test_customer_or_relative_is_not_a_wrong_number(text):
+    assert caller_words.wrong_number(text, "Sunita") is False
+
+
+@pytest.mark.parametrize("text", ["haan ji", "kal kar dungi", "Friday tak ho jayega", "nahi"])
+def test_ordinary_answers_are_not_cant_commit(text):
+    assert caller_words.cant_commit(text) is False
+
+
+@pytest.mark.parametrize("text", ["kaun?", "who is this?", "कौन?", "aap kaun?"])
+def test_bare_who_is_it_is_not_a_wrong_number(text):
+    agent, call, store, session = make_agent()
+    hear(agent, text)
+    assert call.outcome is None and session.closed is False
+    assert caller_words.WRONG_NUMBER_CLOSE["hi"] not in session.said
+
+
+def test_ai_reporting_a_wrong_number_closes_with_the_apology():
+    agent, call, store, session = make_agent()
+    call.heard("main kisi Sunita ko nahi jaanta")
+    assert run_tool(agent, agent.report_person(None, "third_party")) == "stopped"
+    assert session.said == [caller_words.WRONG_NUMBER_CLOSE["hi"]] and call.outcome == "wrong_number"
