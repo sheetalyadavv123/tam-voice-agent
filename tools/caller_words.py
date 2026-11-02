@@ -639,6 +639,47 @@ HANDOFF_CLOSE_NO_TIME = {
     "hi": "ठीक है {name} जी, हमारी सहयोगी आपसे जल्द संपर्क करेंगी। धन्यवाद, अपना ध्यान रखिए।",
     "en": "All right, {name}. Our colleague will be in touch soon. Thank you, take care.",
 }
+
+# ---- a pay date beyond MAX_PROMISE_DAYS. {date} like "12 November", {latest} the
+# last allowed day like "9 November"; *_TP when a verified relative speaks for the customer.
+FAR_DATE_EARLIER = {
+    "hi": "ठीक है, {date} नोट किया। क्या आप {latest} तक pay कर पाएंगे?",
+    "en": "All right, I've noted {date}. Would you be able to pay by {latest}?",
+}
+FAR_DATE_EARLIER_TP = {
+    "hi": "ठीक है, {date} नोट किया। क्या वे {latest} तक pay कर पाएंगे?",
+    "en": "All right, I've noted {date}. Would they be able to pay by {latest}?",
+}
+FAR_DATE_COLLEAGUE = {
+    "hi": "ठीक है, {date} के लिए हमारी एक सहयोगी आपसे बात करके confirm करेंगी। "
+          "उन्हें आपको किस दिन और किस समय कॉल करना ठीक रहेगा?",
+    "en": "All right. A colleague will talk to you to confirm {date}. "
+          "What day and time would suit you for their call?",
+}
+FAR_DATE_COLLEAGUE_TP = {
+    "hi": "ठीक है, {date} के लिए हमारी एक सहयोगी {name} जी से बात करके confirm करेंगी। "
+          "उनसे किस दिन और किस समय बात हो सकती है?",
+    "en": "All right. A colleague will talk to {name} to confirm {date}. "
+          "What day and time would be good to reach {name}?",
+}
+# {when} like "Monday 2 November, दोपहर 12 बजे"; {day} like "Tuesday 3 November"
+FAR_DATE_CLOSE = {
+    "hi": "ठीक है, हमारी सहयोगी आपको {when} कॉल करेंगी। धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right. Our colleague will call you on {when}. Thank you, have a good day.",
+}
+FAR_DATE_CLOSE_DAY = {
+    "hi": "ठीक है, हमारी सहयोगी आपको {day} को कॉल करेंगी। धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right. Our colleague will call you on {day}. Thank you, have a good day.",
+}
+FAR_DATE_CLOSE_TP = {
+    "hi": "धन्यवाद। हमारी सहयोगी {name} जी को {when} कॉल करेंगी। आपका दिन शुभ हो।",
+    "en": "Thank you. Our colleague will call {name} on {when}. Have a good day.",
+}
+FAR_DATE_CLOSE_DAY_TP = {
+    "hi": "धन्यवाद। हमारी सहयोगी {name} जी को {day} को कॉल करेंगी। आपका दिन शुभ हो।",
+    "en": "Thank you. Our colleague will call {name} on {day}. Have a good day.",
+}
+
 SILENCE_CHECK = {
     "hi": "क्या आप मुझे सुन पा रहे हैं?",
     "en": "Can you hear me?",

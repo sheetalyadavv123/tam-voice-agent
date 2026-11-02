@@ -728,7 +728,7 @@ def test_hardship_then_a_date_after_the_one_ask():
     agent, call, store, session = make_agent()
     confirmed(call)
     hear(agent, "salary nahi aayi abhi")
-    assert hear(agent, "5 tareekh ko kar dungi") is False
+    assert hear(agent, "2 tareekh ko kar dungi") is False  # 2 November: within 7 days
     assert call.hardship == "with_date" and call.push_stopped is None
 
 

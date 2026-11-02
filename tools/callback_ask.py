@@ -16,7 +16,7 @@ answer; this adds:
 - A day outside the allowed days or too far is not remembered: the usual handling.
 """
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from tools import policy, rules, spoken
 from tools.collection_tools import ANY_TIME_NOTE, DAY_ONLY_NOTE
@@ -45,6 +45,16 @@ def day_named(text, today):
 
 def at_default_hour(day, tz):
     return datetime(day.year, day.month, day.day, policy.DEFAULT_CALLBACK_HOUR, 0, tzinfo=tz)
+
+
+def next_default_slot(now):
+    """The first DEFAULT_CALLBACK_HOUR still ahead and inside the rules: today's if it
+    hasn't passed, else tomorrow's."""
+    for days in range(3):
+        when = at_default_hour(now.date() + timedelta(days=days), now.tzinfo)
+        if rules.validate_callback_time(when, now)["ok"]:
+            return when
+    return None
 
 
 say_day = say  # "Monday 9 November", in Hindi lines too, as say_when writes days
