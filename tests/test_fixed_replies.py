@@ -901,6 +901,129 @@ def test_bare_who_is_it_is_not_a_wrong_number(text):
     assert caller_words.WRONG_NUMBER_CLOSE["hi"] not in session.said
 
 
+# ---- batch 5 fix: wrong number at every step of the third-party flow ----
+
+WRONG_HI = caller_words.WRONG_NUMBER_CLOSE["hi"]
+
+
+@pytest.mark.parametrize("text", [
+    "मैं सुनीता को नहीं जानती.", "सुनीता को नहीं जानता", "मैं सुनीता को जानती ही नहीं हूं.",
+    "किसी सुनीता को नहीं जानते", "यहाँ कोई सुनीता नहीं है", "कोई सुनीता नहीं है",
+    "Sunita ko jaanti hi nahi", "main Suneeta ko jaanta hi nahin", "सुनिता को नहीं जानती",
+    "sunita ko jaanta tak nahi"])
+def test_new_ways_of_not_knowing_the_customer(text):
+    assert caller_words.wrong_number(text, "Sunita") is True
+
+
+@pytest.mark.parametrize("text", [
+    "कुछ भी नहीं.", "कुछ नहीं", "कोई रिश्ता नहीं", "कोई नहीं", "कोई रिश्ता नहीं है", "kuch bhi nahi",
+    "koi rishta nahi hai", "koi nahi", "no relation", "No relation.", "nobody", "not related"])
+def test_no_relation_answers(text):
+    assert caller_words.no_relation(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "main unka bhai hoon", "koi baat nahi", "नहीं", "कोई बात नहीं, मैं उनकी बहन हूँ", "kuch bhi nahi pata",
+    "नहीं, आपकी बात सुनीता जी से नहीं हो रही."])
+def test_real_answers_are_not_no_relation(text):
+    assert caller_words.no_relation(text) is False
+
+
+def at_relationship_step(agent):
+    assert hear(agent, "Sunita ghar pe nahi hai") is True
+    assert agent.flow.state == "relationship"
+
+
+def wrong_number_ended(agent, call, store, session):
+    assert session.said[-1] == WRONG_HI and session.closed is True
+    assert call.outcome == "wrong_number" and call.unlocked is False
+    assert store.callbacks_due(FAR) == [] and store.promises_for("C002") == []
+    assert "2,200" not in " ".join(session.said)
+
+
+@pytest.mark.parametrize("text", ["कुछ भी नहीं.", "कोई रिश्ता नहीं", "no relation", "मैं सुनीता को नहीं जानती."])
+def test_wrong_number_at_the_relationship_step(text, caplog):
+    agent, call, store, session = make_agent()
+    at_relationship_step(agent)
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, text) is True
+    wrong_number_ended(agent, call, store, session)
+    assert "RULE wrong_number: at the relationship" in caplog.text
+
+
+def test_no_relation_words_only_count_at_the_relationship_step():
+    agent, call, store, session = make_agent()
+    hear(agent, BROTHER)  # consent step now
+    hear(agent, "कोई नहीं")
+    assert call.outcome is None and session.closed is False
+
+
+def test_wrong_number_at_the_consent_step():
+    agent, call, store, session = make_agent()
+    hear(agent, BROTHER)
+    assert agent.flow.state == "consent"
+    assert hear(agent, "मैं सुनीता को नहीं जानती.") is True
+    wrong_number_ended(agent, call, store, session)
+
+
+def test_wrong_number_at_the_dob_step():
+    agent, call, store, session = make_agent()
+    hear(agent, BROTHER)
+    hear(agent, "haan bataiye")
+    assert agent.flow.state == "dob"
+    assert hear(agent, "Sunita ko jaanti hi nahi") is True
+    wrong_number_ended(agent, call, store, session)
+    assert call.dob_attempts == 0  # not counted as a date-of-birth try
+
+
+def test_wrong_number_at_the_callback_time_step():
+    agent, call, store, session = make_agent()
+    hear(agent, BROTHER)
+    hear(agent, "नहीं")
+    assert agent.flow.state == "availability"
+    assert hear(agent, "मैं सुनीता को जानती ही नहीं हूं.") is True
+    wrong_number_ended(agent, call, store, session)
+
+
+def test_console_transcript_wrong_number_ends_at_the_first_clear_sign(caplog):
+    # Console test: the AI reported a third party, then the flow kept asking questions
+    agent, call, store, session = make_agent()
+    assert hear(agent, "नहीं, आपकी बात सुनीता जी से नहीं हो रही.") is False  # the AI's turn
+    assert run_tool(agent, agent.report_person(None, "third_party")) == "stopped"
+    assert session.said == [says(caller_words.TP_RELATIONSHIP)]
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, "कुछ भी नहीं.") is True
+    assert session.said == [says(caller_words.TP_RELATIONSHIP), WRONG_HI]
+    wrong_number_ended(agent, call, store, session)
+    assert "RULE wrong_number: at the relationship step (no relation)" in caplog.text
+
+
+@pytest.mark.parametrize("second", ["कुछ भी नहीं. मैं सुनीता को नहीं जानती.", "मैं सुनीता को नहीं जानती."])
+def test_console_transcript_with_the_second_line_as_one_message(second):
+    agent, call, store, session = make_agent()
+    hear(agent, "नहीं, आपकी बात सुनीता जी से नहीं हो रही.")
+    run_tool(agent, agent.report_person(None, "third_party"))
+    assert hear(agent, second) is True
+    wrong_number_ended(agent, call, store, session)
+
+
+def test_wrong_number_after_cant_commit_ends_without_a_callback():
+    agent, call, store, session = make_agent()
+    verified_brother(agent)
+    hear(agent, "pata nahi")
+    assert hear(agent, "sorry, main kisi Sunita ko nahi jaanta") is True
+    assert session.said[-1] == WRONG_HI and session.closed is True
+    assert call.outcome == "wrong_number" and store.callbacks_due(FAR) == []
+
+
+def test_a_relative_saying_bhai_still_gets_the_consent_question():
+    agent, call, store, session = make_agent()
+    at_relationship_step(agent)
+    assert hear(agent, "bhai") is True
+    assert call.third_party["relationship"] == "brother"
+    assert session.said[-1] == says(caller_words.TP_CONSENT) and call.outcome is None
+
+
 def test_ai_reporting_a_wrong_number_closes_with_the_apology():
     agent, call, store, session = make_agent()
     call.heard("main kisi Sunita ko nahi jaanta")
