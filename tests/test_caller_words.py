@@ -109,7 +109,7 @@ def test_said_a_date(lines, said):
 
 @pytest.mark.parametrize("text", [
     "haan ji", "हाँ, मैं ही बोल रही हूँ", "जी, बोलिए", "ji haan", "yes", "Yes, speaking",
-    "main hi hoon", "I am", "It's me", "Sunita here", "हां जी",
+    "main hi hoon", "I am Sunita", "It's me", "Sunita here", "हां जी", "This is Sunita",
 ])
 def test_clear_yes_confirms_identity(text):
     assert caller_words.confirms_identity(text, "Sunita") is True

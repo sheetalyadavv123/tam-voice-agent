@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS callbacks (
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'cancelled')),
     session_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    note TEXT  -- "caller gave day only": the code picked the hour (DEFAULT_CALLBACK_HOUR)
+    note TEXT  -- "caller gave day only" / "caller said any time": the hour is DEFAULT_CALLBACK_HOUR
 );
 -- Older databases: db/migrations/004_callback_note.sql
 ALTER TABLE callbacks ADD COLUMN IF NOT EXISTS note TEXT;

@@ -251,6 +251,8 @@ async def _agent_call(conn, lines):
     from tools.collection_tools import Call
 
     class Session:
+        tts = None  # a language switch checks it
+
         def say(self, text):
             class H:
                 async def wait_for_playout(self):
@@ -464,13 +466,36 @@ def test_sister_cant_commit_day_only_saves_the_callback_at_the_default_hour():
 
 @pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
 def test_busy_customer_day_only_saves_a_customer_requested_callback():
-    rows, call = _rolled_back(["haan, abhi busy hoon", "Monday call karna", "koi bhi time"])
+    rows, call = _rolled_back(["haan, abhi busy hoon", "Monday call karna", "pata nahi"])
     assert [tuple(r) for r in rows["callbacks"]] == [
         ("C002", datetime(2026, 11, 2, 11, 0, tzinfo=IST), "customer_requested", "open")]
     assert [r["note"] for r in rows["callback_notes"]] == ["caller gave day only"]
     assert rows["session"][0]["outcome"] == "callback_requested"
     assert [tuple(r) for r in rows["attempts"]] == [("C002", "reminder", "callback_requested")]
     assert rows["meta"]["person_status"] == "unavailable" and rows["promises"] == []
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_busy_before_identity_console_transcript_saves_a_customer_unavailable_callback():
+    rows, call = _rolled_back([
+        "Actually, I'm quite occupied. Right? Now. So can you please call me on Monday?",
+        "You can call me whenever"])
+    assert [tuple(r) for r in rows["callbacks"]] == [
+        ("C002", datetime(2026, 11, 2, 11, 0, tzinfo=IST), "customer_unavailable", "open")]
+    assert [r["note"] for r in rows["callback_notes"]] == ["caller said any time"]
+    assert rows["session"][0]["outcome"] == "not_available"
+    assert rows["meta"]["note"] == "identity not confirmed, callback booked; caller said any time"
+    assert rows["meta"]["person_status"] == "unavailable"
+    assert rows["promises"] == [] and rows["links"] == []
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_busy_yes_monday_any_time_saves_at_once():
+    rows, call = _rolled_back(["haan, abhi busy hoon, Monday kisi bhi time"])
+    assert [tuple(r) for r in rows["callbacks"]] == [
+        ("C002", datetime(2026, 11, 2, 11, 0, tzinfo=IST), "customer_requested", "open")]
+    assert [r["note"] for r in rows["callback_notes"]] == ["caller said any time"]
+    assert rows["session"][0]["outcome"] == "callback_requested"
 
 
 @pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")

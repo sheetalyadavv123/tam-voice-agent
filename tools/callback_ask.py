@@ -2,19 +2,36 @@
 
 Every callback flow uses this (someone else answered, a relative who can't commit,
 hardship, a customer who asks to be called later). spoken.callback_time reads one
-answer; this adds the day-only rule:
+answer; this adds:
 
-- A day with no time ("kal", "Monday", "parson") gets one question for the time.
-- If the next answer still has no time ("pata nahi kab", "koi bhi time"), the call is
-  booked on that day at DEFAULT_CALLBACK_HOUR, and the close names the day only.
-- A time given for that day ("shaam 5 baje") is booked on that day, not today.
-- A day outside the allowed days, or too far, or a day with a part of the day but no
-  hour ("kal shaam"), is not day-only: the flow's usual handling applies.
+- A day is remembered from any answer ("call me on Monday" ... "whenever").
+- "Any time" ("anytime", "whenever", "koi bhi time", "किसी भी time", "kabhi bhi",
+  "jab chahe") is an answer: that day at DEFAULT_CALLBACK_HOUR straight away, with the
+  note "caller said any time". With no day yet, the flow asks for the day as usual.
+- A day with no time gets one question for the time. The time is asked at most once in
+  a flow (the flow's own "please tell me the time" counts too: mark_asked): after that,
+  any answer without a time books the day at DEFAULT_CALLBACK_HOUR, note "caller gave
+  day only". The close names the day only.
+- A time given later ("shaam 5 baje") is booked on the day they gave, not today.
+- A day outside the allowed days or too far is not remembered: the usual handling.
 """
+import re
 from datetime import datetime
 
 from tools import policy, rules, spoken
+from tools.collection_tools import ANY_TIME_NOTE, DAY_ONLY_NOTE
 from tools.dates import dates_said, days_named, say
+
+ANY_TIME = re.compile(
+    r"\b(?:any\s*time|anytime|whenever|any\s+time\s+is\s+(?:fine|ok|okay)"
+    r"|(?:koi|kisi)\s+bhi\s+(?:time|samay|waqt|vakt)|kabhi\s+bhi|jab\s+(?:chahe|chaho|chahiye|marzi|mann)"
+    r"|jab\s+bhi)\b"
+    r"|(?:कोई|किसी)\s+भी\s+(?:time|टाइम|समय|वक्त|वक़्त)|कभी\s+भी|जब\s+(?:चाहे|चाहो|मर्ज़ी|मर्जी|मन)|जब\s+भी",
+    re.I)
+
+
+def says_any_time(text):
+    return bool(ANY_TIME.search(text or ""))
 
 
 def day_named(text, today):
@@ -35,31 +52,40 @@ say_day = say  # "Monday 9 November", in Hindi lines too, as say_when writes day
 
 def book(call, said, reason):
     """Book what read() returned under "when": the caller's time, or their day at the
-    default hour. Returns schedule_callback's result."""
+    default hour (with its note). Returns schedule_callback's result."""
     w = said["when"]
     if said.get("day_only"):
-        return call.schedule_day_only(w.day, w.month, w.year, reason)
+        return call.schedule_day_only(w.day, w.month, w.year, reason, note=said["note"])
     return call.schedule_callback(w.day, w.month, w.year, w.hour, w.minute, reason)
 
 
 class TimeAsk:
     def __init__(self, clock):
         self.clock = clock
-        self.day = None  # a day the caller gave without a time, once asked for the time
+        self.day = None  # a day the caller gave, still without a time
+        self.asked = False  # the time was asked for once: never again
 
     @property
     def waiting(self):
-        """Asked for the time on a day: the next answer books that day either way."""
+        """A day is known: an answer without a time ends in a booking, not a close."""
         return self.day is not None
 
-    def _day_only_ok(self, day, now):
+    def mark_asked(self):
+        """The flow asked for the time itself ("please tell me the day and time")."""
+        self.asked = True
+
+    def _ok(self, day, now):
         return rules.validate_callback_time(at_default_hour(day, now.tzinfo), now)["ok"]
+
+    def _default(self, day, now, note):
+        self.day = None
+        return {"when": at_default_hour(day, now.tzinfo), "day_only": True, "note": note}
 
     def read(self, text):
         """One answer. Returns
-          {"when": datetime}                    a time to book (the caller's)
-          {"when": datetime, "day_only": True}  their day at DEFAULT_CALLBACK_HOUR
-          {"ask_time": date}                    ask once for the time on that day
+          {"when": datetime}                                   the caller's time
+          {"when": datetime, "day_only": True, "note": ...}    a day at DEFAULT_CALLBACK_HOUR
+          {"ask_time": date}                                   ask (once) for the time
           otherwise what spoken.callback_time returned ({"missing": "time" or "both"})."""
         now = self.clock()
         said = spoken.callback_time(text, now)
@@ -70,16 +96,15 @@ class TimeAsk:
                 w = w.replace(year=self.day.year, month=self.day.month, day=self.day.day)
             self.day = None
             return {"when": w}
-        part_of_day = any(p.search(text) for _, p in spoken.PART_OF_DAY)
-        if part_of_day or (day is not None and not self._day_only_ok(day, now)):
-            self.day = None  # "kal shaam", "agle mahine": not day-only, the usual handling
-            return said
         if day is not None:
-            if self.day is None:  # first time: ask once for the time
-                self.day = day
-                return {"ask_time": day}
-            self.day = day  # asked already; "nahi, Tuesday" moves the day
-        if self.day is not None:  # asked once, still no time: the default hour
-            day, self.day = self.day, None
-            return {"when": at_default_hour(day, now.tzinfo), "day_only": True}
-        return said
+            if not self._ok(day, now):
+                return said  # "aaj" after the default hour, too far: the usual handling
+            self.day = day  # "nahi, Tuesday" moves the day
+        if self.day is None:
+            return said  # "whenever" with no day yet: the flow asks for the day
+        if says_any_time(text):
+            return self._default(self.day, now, ANY_TIME_NOTE)
+        if self.asked:  # asked once already: no more questions
+            return self._default(self.day, now, DAY_ONLY_NOTE)
+        self.asked = True
+        return {"ask_time": self.day}

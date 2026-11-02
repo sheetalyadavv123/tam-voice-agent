@@ -16,8 +16,7 @@ import re
 from dataclasses import dataclass
 
 from tools import caller_words, policy, spoken
-from tools.callback_ask import TimeAsk, book, say_day
-from tools.collection_tools import DAY_ONLY_NOTE
+from tools.callback_ask import TimeAsk, book, say_day, says_any_time
 from tools.dates import say_when
 
 logger = logging.getLogger("tam-voice-agent")
@@ -199,7 +198,7 @@ class ThirdPartyFlow:
     # ---- when can we reach the customer? ----
     def _availability(self, text, lang):
         call = self.call
-        if DONT_KNOW.search(text) and not self.ask.waiting:
+        if DONT_KNOW.search(text) and not self.ask.waiting and not says_any_time(text):
             return self._close(lang)
         said = self.ask.read(text)  # "kal" alone: asked once for the time, then the default hour
         if "ask_time" in said:
@@ -207,10 +206,10 @@ class ThirdPartyFlow:
                         said["ask_time"])
             return Reply(self._line(caller_words.TIME_FOR_DAY, lang, day=say_day(said["ask_time"])))
         if "when" in said:
-            w, day_only = said["when"], said.get("day_only", False)
+            w = said["when"]
             result = book(call, said, "customer_unavailable")
             if result.get("saved"):
-                return self._close(lang, when=w, day_only=day_only)
+                return self._close(lang, when=w, note=said.get("note"))
             missing = None
         else:
             missing = said["missing"]
@@ -219,23 +218,25 @@ class ThirdPartyFlow:
         self.time_misses += 1
         if self.time_misses >= MAX_TIME_MISSES:
             return self._close(lang)
+        self.ask.mark_asked()  # the time is asked for once at most
         if missing:
             return Reply(self._line(caller_words.TIME_INCOMPLETE, lang))
         return Reply(time_outside_line(lang))
 
-    def _close(self, lang, when=None, day_only=False):
+    def _close(self, lang, when=None, note=None):
+        """note: "caller gave day only" / "caller said any time" for the default hour."""
         self.state = "done"
         notes = []
         if self.couldnt_commit:
             notes.append("relative could not commit, " + ("callback booked" if when else "no time given"))
-        if day_only:
-            notes.append(DAY_ONLY_NOTE)
+        if note:
+            notes.append(note)
         self.call.record_outcome("third_party", "; ".join(notes))
         logger.info("RULE third_party_close: %s", ("callback at " + when.isoformat()
-                                                   + (" (day only)" if day_only else ""))
+                                                   + (f" ({note})" if note else ""))
                     if when else "no time given")
         self._log_disclosure()
-        if day_only:
+        if note:
             return Reply(self._line(caller_words.TP_CLOSE_DAY, lang, day=say_day(when)), hang_up=True)
         if when is not None:
             return Reply(self._line(caller_words.TP_CLOSE_TIME, lang, when=say_when(when, lang)),

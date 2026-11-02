@@ -27,6 +27,8 @@ class FakeHandle:
 
 
 class FakeSession:
+    tts = None  # no voice in text tests; a language switch checks it
+
     def __init__(self):
         self.said, self.closed, self.history = [], False, []
 

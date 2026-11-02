@@ -31,6 +31,11 @@ I_AM = re.compile(
     r"\b(?:main\s+hi|mai\s+hi|main\s+hoon|i\s+am|i'm|it'?s\s+me|this\s+is|speaking"
     r"|bol\s+rah[ia])\b|मैं\s+ही|मै\s+ही|बोल\s+रह[ीा]",
     re.I)
+# I_AM without "I am", "I'm" and "this is", which need the name after them
+SPEAKING = re.compile(
+    r"\b(?:main\s+hi|mai\s+hi|main\s+hoon|it'?s\s+me|speaking|bol\s+rah[ia])\b"
+    r"|मैं\s+ही|मै\s+ही|बोल\s+रह[ीा]",
+    re.I)
 
 LEGAL = re.compile(
     r"\b(?:case|court|legal|lawyer|advocate|police|fir|notice|jail|arrest|lawsuit|sue"
@@ -148,7 +153,9 @@ def confirms_identity(text, first_name):
     # Mohammed) only counts with a clear yes or "main hi": "Amita bol rahi hoon" is not one
     if fuzzy_name_only(text, first_name):
         return False
-    if I_AM.search(text):
+    # "speaking", "main hi hoon", "bol rahi hoon" say it's them; "I'm", "I am", "this is"
+    # only with the name ("I'm Sunita", below): "I'm busy", "I'm occupied" are not a yes
+    if SPEAKING.search(text):
         return True
     # the name alone: "Sunita", "सुनीता जी"; not "Sunita ghar pe nahi hai"
     talked_about = DECLINE.search(text) or CUSTOMER_AWAY.search(text)
