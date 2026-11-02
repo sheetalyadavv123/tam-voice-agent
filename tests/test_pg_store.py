@@ -122,12 +122,13 @@ SESSION = "00000000-0000-0000-0000-000000000001"
 
 
 async def _begin(conn):
-    """Start the test's transaction and apply the newest migration inside it, so a
+    """Start the test's transaction and apply the newer migrations inside it, so a
     database that hasn't been migrated yet is not changed (it is all rolled back)."""
     tr = conn.transaction()
     await tr.start()
-    sql = (ROOT / "db" / "migrations" / "003_number_check.sql").read_text(encoding="utf-8")
-    await conn.execute(sql.replace("BEGIN;", "").replace("COMMIT;", ""))
+    for name in ("003_number_check.sql", "004_callback_note.sql"):
+        sql = (ROOT / "db" / "migrations" / name).read_text(encoding="utf-8")
+        await conn.execute(sql.replace("BEGIN;", "").replace("COMMIT;", ""))
     return tr
 
 
@@ -289,6 +290,7 @@ async def _agent_call(conn, lines):
         "session": await q("SELECT outcome, metadata FROM call_sessions WHERE id = $1"),
         "attempts": await q("SELECT customer_id, kind, outcome FROM call_attempts WHERE session_id = $1"),
         "callbacks": await q("SELECT customer_id, due_at, reason, status FROM callbacks WHERE session_id = $1"),
+        "callback_notes": await q("SELECT note FROM callbacks WHERE session_id = $1"),
         "promises": await q("SELECT id FROM promises WHERE session_id = $1"),
         "links": await q("SELECT id FROM payment_links WHERE session_id = $1"),
     }
@@ -438,3 +440,62 @@ def test_the_call_saves_the_dialled_numbers_hash():
 
     saved = asyncio.run(go())
     assert saved == phone_hash(_c002_phone()) and _c002_phone() not in saved
+
+
+# ---- batch 6: day-only callbacks and the schema check, against Neon ----
+
+THURSDAY_11 = datetime(2026, 10, 29, 11, 0, tzinfo=IST)  # "kal" from NOW
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_sister_cant_commit_day_only_saves_the_callback_at_the_default_hour():
+    rows, call = _rolled_back(["Sunita ghar pe nahi hai", "main unki behen hoon", "haan bataiye",
+                               "2 November 1985", "pata nahi, unse hi poochna padega", "kal",
+                               "pata nahi kab"])
+    assert [tuple(r) for r in rows["callbacks"]] == [
+        ("C002", THURSDAY_11, "customer_unavailable", "open")]
+    assert rows["callbacks"][0]["due_at"].astimezone(IST).hour == 11
+    assert [r["note"] for r in rows["callback_notes"]] == ["caller gave day only"]
+    assert rows["promises"] == [] and rows["links"] == []
+    assert rows["session"][0]["outcome"] == "third_party"
+    assert rows["meta"]["note"] == "relative could not commit, callback booked; caller gave day only"
+    assert rows["meta"]["third_party"]["relationship"] == "sister"
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_busy_customer_day_only_saves_a_customer_requested_callback():
+    rows, call = _rolled_back(["haan, abhi busy hoon", "Monday call karna", "koi bhi time"])
+    assert [tuple(r) for r in rows["callbacks"]] == [
+        ("C002", datetime(2026, 11, 2, 11, 0, tzinfo=IST), "customer_requested", "open")]
+    assert [r["note"] for r in rows["callback_notes"]] == ["caller gave day only"]
+    assert rows["session"][0]["outcome"] == "callback_requested"
+    assert [tuple(r) for r in rows["attempts"]] == [("C002", "reminder", "callback_requested")]
+    assert rows["meta"]["person_status"] == "unavailable" and rows["promises"] == []
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_a_callback_with_a_time_saves_no_note():
+    rows, call = _rolled_back(["haan, abhi busy hoon", "kal subah 10 baje"])
+    assert [r["note"] for r in rows["callback_notes"]] == [None]
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_schema_check_against_neon_finds_a_dropped_column_and_is_rolled_back():
+    from tools import schema_check
+
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        tr = await _begin(conn)  # 003 and 004 applied inside the transaction
+        try:
+            migrated = await schema_check.check(conn)
+            await conn.execute("ALTER TABLE callbacks DROP COLUMN note")
+            dropped = await schema_check.check(conn)
+            return migrated, dropped
+        finally:
+            await tr.rollback()
+            await conn.close()
+
+    migrated, dropped = asyncio.run(go())
+    assert migrated == {"missing": [], "migrations": []}
+    assert dropped == {"missing": ["callbacks.note"],
+                       "migrations": ["db/migrations/004_callback_note.sql"]}

@@ -503,11 +503,21 @@ def test_okay_at_the_greeting_asks_who_it_is_again(caplog):
     assert "RULE identity_not_confirmed" in caplog.text
 
 
-def test_a_busy_yes_is_left_to_the_ai():
+def test_a_busy_yes_is_asked_when_to_call(caplog):
     agent, call, store, session = make_agent()
-    assert turn_with_ctx(agent, "haan main hi hoon, par abhi busy hoon") == [
-        "The caller just confirmed they are Sunita. Call report_person with status customer now."]
-    assert session.said == []
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, "haan main hi hoon, par abhi busy hoon") is True
+    assert session.said == [caller_words.CALL_LATER_ASK["hi"]] and session.closed is False
+    assert call.person_status == "unavailable" and not call.unlocked
+    assert "RULE identity_busy" in caplog.text
+
+
+def test_a_busy_yes_that_talks_about_paying_is_left_to_the_ai():
+    agent, call, store, session = make_agent()
+    notes = turn_with_ctx(agent, "haan main hi hoon, abhi busy hoon, Friday tak pay kar dungi")
+    assert notes[0] == ("The caller just confirmed they are Sunita. Call report_person with "
+                        "status customer now.")
+    assert session.said == [] and call.person_status is None
 
 
 def test_closed_loan_ends_with_a_fixed_line():
@@ -817,7 +827,7 @@ def test_relative_cant_commit_unclear_time_is_asked_again_then_closes():
     agent, call, store, session = make_agent()
     verified_brother(agent)
     hear(agent, "unse poochna padega")
-    hear(agent, "kal")  # a day without a time
+    hear(agent, "shaam ko")  # a part of the day without an hour (a day alone: batch 6)
     assert session.said[-1] == caller_words.TIME_INCOMPLETE["hi"] and session.closed is False
     hear(agent, "dekhte hain")
     assert session.said[-1] == says(caller_words.TP_CLOSE) and session.closed is True

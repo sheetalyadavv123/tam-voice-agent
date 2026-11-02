@@ -18,6 +18,13 @@ if THIRD_PARTY_DISCLOSURE not in ("none", "dob_verified"):
 CALL_WINDOW_START = int(os.getenv("CALL_WINDOW_START", "8"))
 CALL_WINDOW_END = int(os.getenv("CALL_WINDOW_END", "19"))
 
+# The caller named a day for a callback but no time, even when asked once: the call is
+# booked at this hour on that day (with the note "caller gave day only").
+DEFAULT_CALLBACK_HOUR = int(os.getenv("DEFAULT_CALLBACK_HOUR") or "11")
+if not CALL_WINDOW_START <= DEFAULT_CALLBACK_HOUR < CALL_WINDOW_END:
+    raise ValueError(f"DEFAULT_CALLBACK_HOUR must be inside the calling window "
+                     f"({CALL_WINDOW_START} to {CALL_WINDOW_END - 1}), got {DEFAULT_CALLBACK_HOUR}")
+
 MAX_ATTEMPTS_PER_DAY = int(os.getenv("MAX_ATTEMPTS_PER_DAY", "2"))
 MAX_ATTEMPTS_PER_WEEK = int(os.getenv("MAX_ATTEMPTS_PER_WEEK", "5"))
 MAX_PROMISE_DAYS = int(os.getenv("MAX_PROMISE_DAYS", "7"))
