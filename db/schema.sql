@@ -29,9 +29,14 @@ CREATE TABLE IF NOT EXISTS call_attempts (
     attempted_at TIMESTAMPTZ NOT NULL,
     session_id UUID,
     kind TEXT NOT NULL DEFAULT 'reminder' CHECK (kind IN ('reminder', 'followup')),
-    outcome TEXT
+    outcome TEXT,
+    phone_hash TEXT,              -- SHA-256 of the dialled number's digits
+    number_checked_at TIMESTAMPTZ -- a person checked the number after a wrong-number call
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_customer ON call_attempts (customer_id, attempted_at);
+-- Older databases: db/migrations/003_number_check.sql
+ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS phone_hash TEXT;
+ALTER TABLE call_attempts ADD COLUMN IF NOT EXISTS number_checked_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS promises (
     id BIGSERIAL PRIMARY KEY,

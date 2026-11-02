@@ -40,7 +40,15 @@ def _blocked(verdict, now, **ids):
     return {"action": "skip", "reason": verdict["reason"], **ids}
 
 
+def needs_number_check(store, customer_id):
+    """The last call reached someone who doesn't know the customer: a person must check
+    the phone number before the system calls it again (see store.number_check_hold)."""
+    return store.number_check_hold(customer_id) is not None
+
+
 def run_due_followups(store, now, record_attempts=True):
+    """Promises still record kept/broken as usual; for a customer whose number needs a
+    check, nothing is called and callbacks stay open, listed as "needs_number_check"."""
     now = now.astimezone(IST)
     today = now.date()
     actions, planned = [], set()
@@ -65,6 +73,9 @@ def run_due_followups(store, now, record_attempts=True):
                 continue
             if cid in planned or _followed_up_today(store, cid, today):
                 continue
+            if needs_number_check(store, cid):
+                actions.append({"action": "skip", "reason": "needs_number_check", **ids})
+                continue
             verdict = _gate(store, cid, now)
             if not verdict["allowed"]:
                 actions.append(_blocked(verdict, now, **ids))
@@ -78,6 +89,9 @@ def run_due_followups(store, now, record_attempts=True):
     for cb in store.callbacks_due(now):
         cid = cb["customer_id"]
         ids = {"customer_id": cid, "callback_id": cb["id"]}
+        if needs_number_check(store, cid):  # a colleague would dial the same number
+            actions.append({"action": "skip", "reason": "needs_number_check", **ids})
+            continue
         if cb["reason"] in HUMAN_REASONS:
             store.set_callback_status(cb["id"], "done")
             actions.append({"action": "route_to_human", "reason": cb["reason"], **ids})

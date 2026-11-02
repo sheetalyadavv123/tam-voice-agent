@@ -140,7 +140,7 @@ def confirms_identity(text, first_name):
     question, "I'm his sister" or another name ("main Rahul bol raha hoon") do not."""
     if not text or says_not_the_customer(text) or asks_why_calling(text):
         return False
-    if other_name(text, first_name):
+    if other_name(text, first_name) or wrong_number(text, first_name):
         return False
     if YES_FIRST.search(text) or I_AM.search(text):
         return True
@@ -252,8 +252,38 @@ def other_name(text, first_name):
     return None
 
 
-def wrong_number(text):
-    return bool(WRONG_NUMBER.search(text or ""))
+NAME_MARK = "CUSTNAME"  # the customer's name, in any spelling, is replaced by this first
+_BE = r"(?:hai|h|hain|he)"
+# "Kaun Sunita?", "main kisi Sunita ko nahi jaanta", "I don't know any Sunita": the person
+# who answered doesn't know the customer. A bare "kaun?" or "who is this?" is not this.
+DOES_NOT_KNOW_CUSTOMER = re.compile(
+    rf"\b(?:kaun|kon|koun)\s+(?:si\s+|see\s+)?{NAME_MARK}"
+    rf"|{NAME_MARK}\s+(?:ji\s+)?(?:kaun|kon|koun)(?:\s+{_BE})?\s*(?:[?.!,]|$)"
+    rf"|कौन\s+(?:सी\s+)?{NAME_MARK}|{NAME_MARK}\s+(?:जी\s+)?कौन(?:\s+(?:है|हैं))?\s*(?:[?।.!,]|$)"
+    rf"|\bwho(?:'?s|\s+is)\s+{NAME_MARK}"
+    rf"|\bkisi\s+{NAME_MARK}|किसी\s+{NAME_MARK}"
+    rf"|{NAME_MARK}\s+(?:ko|को)\s+(?:main\s+|mai\s+|मैं\s+)?(?:nahi|nahin|nhi|नहीं|नही)\s+(?:jaan|jan|जान)"
+    rf"|\b(?:yahan|yahaan|idhar)\s+koi\s+{NAME_MARK}|(?:यहाँ|यहां|इधर)\s+कोई\s+{NAME_MARK}"
+    rf"|\bkoi\s+{NAME_MARK}\s+(?:nahi|nahin|nhi)|कोई\s+{NAME_MARK}\s+(?:नहीं|नही)"
+    rf"|\b(?:don'?t|do\s+not)\s+know\s+(?:any(?:one|body)?\s+)?(?:(?:named|called)\s+|by\s+the\s+name\s+)?{NAME_MARK}"
+    rf"|\bno\s+(?:one\s+(?:named|called)\s+)?{NAME_MARK}\s+(?:here|lives|stays)"
+    rf"|\bthere(?:'?s|\s+is)\s+no\s+{NAME_MARK}",
+    re.I)
+
+
+def _mark_name(text, first_name):
+    """The text with every spelling of the customer's name replaced by NAME_MARK."""
+    return names.WORD.sub(
+        lambda m: NAME_MARK if names.same_name(m.group(0), first_name) else m.group(0), text)
+
+
+def wrong_number(text, first_name=None):
+    """"wrong number", "galat number", or (given the customer's name, in any spelling)
+    "kaun Sunita?", "main kisi Sunita ko nahi jaanta", "I don't know any Sunita"."""
+    text = text or ""
+    if WRONG_NUMBER.search(text):
+        return True
+    return bool(first_name) and bool(DOES_NOT_KNOW_CUSTOMER.search(_mark_name(text, first_name)))
 
 
 def someone_else(text, first_name):
@@ -261,8 +291,8 @@ def someone_else(text, first_name):
     bhai"), another name, a wrong number, "woh ghar pe nahi hain", or a short "no"."""
     if not text or confirms_identity(text, first_name) or CALL_LATER.search(text):
         return False
-    return bool(says_not_the_customer(text) or other_name(text, first_name) or wrong_number(text)
-                or CUSTOMER_AWAY.search(text) or declines(text))
+    return bool(says_not_the_customer(text) or other_name(text, first_name)
+                or wrong_number(text, first_name) or CUSTOMER_AWAY.search(text) or declines(text))
 
 
 def claims_to_be_customer(text, first_name):
@@ -312,6 +342,28 @@ PAY_DAY = re.compile(r"(?<!\d)\d{1,2}\s*(?:tareekh|tarikh|तारीख|ko\b|�
 def hardship(text):
     """"job chali gayi", "paise nahi hain", "salary nahi aayi", "medical emergency"..."""
     return bool(HARDSHIP.search(text or ""))
+
+
+# ---- a verified relative can't say when the customer will pay ----
+CANT_COMMIT = re.compile(
+    r"pata\s+nahi|nahi\s+pata|pata\s+nhi|nhi\s+pata|maloom\s+nahi|nahi\s+maloom|no\s+idea"
+    r"|\b(?:don'?t|do\s+not)\s+know\b|\bnot\s+sure\b"
+    r"|\b(?:nahi|nahin|nhi)\s+(?:bata|keh|kah)\s+sak"
+    r"|\b(?:unse|unhi\s+se|unhise|un\s+se|usse|usi\s+se)\s+(?:hi\s+)?(?:pooch|puch|pouch)"
+    r"|\b(?:wo|woh|vo|voh|wahi|vahi)\s+(?:hi\s+)?(?:batay|bataeng|bata\s+pay|bata\s+sak|decide|tay)"
+    r"|\b(?:can'?t|cannot|can\s+not)\s+(?:say|tell|commit|promise)"
+    r"|\b(?:she|he|they)(?:'ll|\s+will)\s+(?:decide|tell|let\s+you\s+know)"
+    r"|\b(?:ask|check\s+with)\s+(?:her|him|them)\b|\bup\s+to\s+(?:her|him|them)\b"
+    r"|पता\s+नहीं|नहीं\s+पता|मालूम\s+नहीं|नहीं\s+मालूम|नहीं\s+(?:बता|कह)\s+सक"
+    r"|(?:उनसे|उन्हीं\s+से|उन्हीसे|उससे)\s+(?:ही\s+)?पूछ"
+    r"|(?:वो|वह|वे|वही)\s+(?:ही\s+)?(?:बताएं|बताएँ|बताएंगे|बताएँगे|बताएंगी|बताएँगी|बताएगी|बताएगा|बताएगे|तय)",
+    re.I)
+
+
+def cant_commit(text):
+    """"pata nahi", "main nahi bata sakta", "unse hi poochna padega", "she'll decide":
+    the person can't say when the customer will pay."""
+    return bool(CANT_COMMIT.search(text or ""))
 
 
 # Fixed lines the code speaks itself, so the AI can't improvise them.
@@ -453,6 +505,11 @@ TP_REMINDER = {
           "वे इसे कब तक pay कर पाएंगे?",
     "en": "Thank you, that's verified. {name}'s EMI of ₹{amount} was due on {date}. "
           "When will they be able to pay it?",
+}
+# Verified, but can't say when the customer will pay: ask when to reach the customer
+TP_CANT_COMMIT = {
+    "hi": "ठीक है, कोई बात नहीं। {name} जी से किस दिन और किस समय बात हो सकती है?",
+    "en": "That's all right. What day and time would be good to speak with {name}?",
 }
 TP_DUE_QUESTION = {
     "hi": "{name} जी की ₹{amount} की EMI {date} को due थी। वे इसे कब तक pay कर पाएंगे?",

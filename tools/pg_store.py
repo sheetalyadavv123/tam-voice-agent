@@ -76,9 +76,14 @@ class PostgresStore(MemoryStore):
                 "SELECT DISTINCT ON (customer_id) id, customer_id, amount, url, channel, status, "
                 "session_id, created_at, paid_at FROM payment_links "
                 f"WHERE {_FILTER} ORDER BY customer_id, created_at DESC", ids)
+            # the last week's attempts (for the calling limits), plus each customer's latest
+            # finished attempt however old it is (a wrong number stops follow-ups)
             attempts = await conn.fetch(
-                "SELECT customer_id, attempted_at AS at, session_id, kind, outcome "
-                f"FROM call_attempts WHERE attempted_at >= $2 AND {_FILTER}", ids, since)
+                "SELECT id, customer_id, attempted_at AS at, session_id, kind, outcome, "
+                "phone_hash, number_checked_at "
+                f"FROM call_attempts WHERE {_FILTER} AND (attempted_at >= $2 OR id IN ("
+                "SELECT DISTINCT ON (customer_id) id FROM call_attempts WHERE outcome IS NOT NULL "
+                f"AND {_FILTER} ORDER BY customer_id, attempted_at DESC))", ids, since)
         finally:
             if own:
                 await conn.close()
@@ -150,14 +155,39 @@ class PostgresStore(MemoryStore):
                         _uuid_or_none(l["session_id"]), l["created_at"], l["paid_at"])
                 for a in ch["new_attempts"]:
                     await conn.execute(
-                        "INSERT INTO call_attempts (customer_id, attempted_at, session_id, kind, outcome) "
-                        "VALUES ($1, $2, $3, $4, $5)",
-                        a["customer_id"], a["at"], _uuid_or_none(a["session_id"]), a["kind"], a["outcome"])
+                        "INSERT INTO call_attempts (customer_id, attempted_at, session_id, kind, outcome, "
+                        "phone_hash) VALUES ($1, $2, $3, $4, $5, $6)",
+                        a["customer_id"], a["at"], _uuid_or_none(a["session_id"]), a["kind"], a["outcome"],
+                        a.get("phone_hash"))
         finally:
             if own:
                 await conn.close()
         self._flushed = True
         return {k: len(v) for k, v in ch.items()}
+
+    @staticmethod
+    async def clear_number_check(conn, customer_id, now):
+        """A person checked the number: end the wrong-number hold on this customer.
+        Marks their latest finished attempt checked if it was a wrong number not yet
+        checked. Returns {"cleared": bool, "reason"?, "attempt"?} describing what it did."""
+        latest = await conn.fetchrow(
+            "SELECT id, attempted_at, session_id, outcome, number_checked_at FROM call_attempts "
+            "WHERE customer_id = $1 AND outcome IS NOT NULL ORDER BY attempted_at DESC LIMIT 1",
+            customer_id)
+        if latest is None:
+            return {"cleared": False, "reason": "no_finished_attempts"}
+        if latest["outcome"] != "wrong_number":
+            return {"cleared": False, "reason": "latest_attempt_not_wrong_number",
+                    "attempt": dict(latest)}
+        if latest["number_checked_at"] is not None:
+            return {"cleared": False, "reason": "already_checked", "attempt": dict(latest)}
+        row = await conn.fetchrow(
+            "UPDATE call_attempts SET number_checked_at = $2 WHERE id = $1 AND number_checked_at IS NULL "
+            "RETURNING id, attempted_at, session_id, outcome, number_checked_at", latest["id"], now)
+        if row is None:  # checked by someone else in the meantime
+            return {"cleared": False, "reason": "already_checked", "attempt": dict(latest)}
+        logger.info("RULE number_check_cleared: %s attempt %s", customer_id, row["id"])
+        return {"cleared": True, "attempt": dict(row)}
 
     @staticmethod
     async def _open_promise_status(conn, p):

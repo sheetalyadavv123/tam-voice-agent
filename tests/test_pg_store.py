@@ -121,12 +121,21 @@ DSN = dotenv_values(ROOT / ".env").get("DATABASE_URL") if os.getenv("RUN_DB_TEST
 SESSION = "00000000-0000-0000-0000-000000000001"
 
 
+async def _begin(conn):
+    """Start the test's transaction and apply the newest migration inside it, so a
+    database that hasn't been migrated yet is not changed (it is all rolled back)."""
+    tr = conn.transaction()
+    await tr.start()
+    sql = (ROOT / "db" / "migrations" / "003_number_check.sql").read_text(encoding="utf-8")
+    await conn.execute(sql.replace("BEGIN;", "").replace("COMMIT;", ""))
+    return tr
+
+
 @pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
 def test_round_trip_against_neon_is_rolled_back():
     async def go():
         conn = await asyncpg.connect(DSN)
-        tr = conn.transaction()
-        await tr.start()
+        tr = await _begin(conn)
         try:
             s = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
             s.add_promise("C002", date(2026, 10, 30), 2200, SESSION)
@@ -168,8 +177,7 @@ async def _two_calls_promise(conn, first, second, flush_order):
 def test_two_calls_leave_one_open_promise_the_newer_one(flush_order):
     async def go():
         conn = await asyncpg.connect(DSN)
-        tr = conn.transaction()
-        await tr.start()
+        tr = await _begin(conn)
         try:
             rows = await _two_calls_promise(conn, date(2026, 10, 30), date(2026, 10, 31), flush_order)
             open_now = await conn.fetch(
@@ -189,8 +197,7 @@ def test_two_calls_leave_one_open_promise_the_newer_one(flush_order):
 def test_two_calls_with_the_same_date_save_one_row():
     async def go():
         conn = await asyncpg.connect(DSN)
-        tr = conn.transaction()
-        await tr.start()
+        tr = await _begin(conn)
         try:
             return await _two_calls_promise(conn, date(2026, 10, 30), date(2026, 10, 30), ("older", "newer"))
         finally:
@@ -207,8 +214,7 @@ def test_promise_by_a_relative_saves_its_note_and_is_rolled_back():
 
     async def go():
         conn = await asyncpg.connect(DSN)
-        tr = conn.transaction()
-        await tr.start()
+        tr = await _begin(conn)
         try:
             s = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
             call = Call(s, "C002", session_id=SESSION, clock=lambda: NOW)
@@ -227,3 +233,208 @@ def test_promise_by_a_relative_saves_its_note_and_is_rolled_back():
     rows = asyncio.run(go())
     assert [(r["promised_date"], r["status"], r["note"]) for r in rows] == [
         (date(2026, 10, 30), "open", "promised by brother Rahul")]
+
+
+# ---- batch 5: the rows the two new rules write, through the real agent hook ----
+
+async def _agent_call(conn, lines):
+    """One call for C002 through the agent: the attempt is added as entrypoint() does
+    with TEST_MODE off, the caller's lines are heard, then the call is saved as
+    finish() saves it. Returns (rows, call)."""
+    import json
+    import sys
+    sys.path.insert(0, str(ROOT / "agent"))
+    import db
+    import main
+    from livekit.agents import StopResponse, llm
+    from tools.collection_tools import Call
+
+    class Session:
+        def say(self, text):
+            class H:
+                async def wait_for_playout(self):
+                    pass
+            return H()
+
+        def shutdown(self):
+            pass
+
+        def _conversation_item_added(self, item):
+            pass
+
+    sid = uuid.UUID(SESSION)
+    store = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+    store.add_attempt("C002", NOW, SESSION, "reminder", phone=store.get_customer("C002")["phone"])
+    call = Call(store, "C002", session_id=SESSION, clock=lambda: NOW)
+    agent = main.Collector(call, "x")
+    old = main.Collector.session
+    main.Collector.session = property(lambda self: Session())
+    try:
+        for text in lines:
+            try:
+                await agent.on_user_turn_completed(None, llm.ChatMessage(role="user", content=[text]))
+            except StopResponse:
+                if agent._end_task:
+                    await agent._end_task
+    finally:
+        main.Collector.session = old
+    call.finalize_outcome()
+    store.set_attempt_outcome(SESSION, call.outcome)
+    await store.flush(conn=conn)
+    turns = [{"role": "user", "text": t, "interrupted": False, "created_at": NOW} for t in lines]
+    await db.save_call(sid, "test-room", "agent", NOW, NOW, turns, outcome=call.outcome,
+                       metadata=call.summary(), conn=conn)
+    q = lambda sql: conn.fetch(sql, sid)
+    rows = {
+        "session": await q("SELECT outcome, metadata FROM call_sessions WHERE id = $1"),
+        "attempts": await q("SELECT customer_id, kind, outcome FROM call_attempts WHERE session_id = $1"),
+        "callbacks": await q("SELECT customer_id, due_at, reason, status FROM callbacks WHERE session_id = $1"),
+        "promises": await q("SELECT id FROM promises WHERE session_id = $1"),
+        "links": await q("SELECT id FROM payment_links WHERE session_id = $1"),
+    }
+    rows["meta"] = json.loads(rows["session"][0]["metadata"])
+    return rows, call
+
+
+def _rolled_back(lines):
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        tr = await _begin(conn)
+        try:
+            return await _agent_call(conn, lines)
+        finally:
+            await tr.rollback()
+            await conn.close()
+    return asyncio.run(go())
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_relative_who_cant_commit_saves_one_callback_and_no_promise():
+    rows, call = _rolled_back(["nahi, main unka bhai Rahul bol raha hoon", "haan bataiye",
+                               "2 November 1985", "pata nahi, unse hi poochna padega",
+                               "kal shaam 6 baje"])
+    assert [tuple(r) for r in rows["callbacks"]] == [
+        ("C002", datetime(2026, 10, 29, 18, 0, tzinfo=IST), "customer_unavailable", "open")]
+    assert rows["callbacks"][0]["due_at"].astimezone(IST).hour == 18  # 6 pm IST
+    assert rows["promises"] == [] and rows["links"] == []
+    assert [tuple(r) for r in rows["attempts"]] == [("C002", "reminder", "third_party")]
+    assert rows["session"][0]["outcome"] == "third_party"
+    assert rows["meta"]["note"] == "relative could not commit, callback booked"
+    assert rows["meta"]["third_party"]["relationship"] == "brother"
+    assert rows["meta"]["third_party"]["name"] == "Rahul"
+    assert rows["meta"]["promise_recorded"] is False and rows["meta"]["callback_scheduled"] is True
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_wrong_number_saves_only_the_outcome():
+    rows, call = _rolled_back(["kaun Sunita? Main kisi Sunita ko nahi jaanta"])
+    assert rows["session"][0]["outcome"] == "wrong_number"
+    assert [tuple(r) for r in rows["attempts"]] == [("C002", "reminder", "wrong_number")]
+    assert rows["callbacks"] == [] and rows["promises"] == [] and rows["links"] == []
+    assert rows["meta"]["third_party"] is None and rows["meta"]["callback_scheduled"] is False
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_scheduler_sees_an_old_wrong_number_attempt():
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        tr = await _begin(conn)
+        try:
+            await conn.execute(
+                "INSERT INTO call_attempts (customer_id, attempted_at, session_id, kind, outcome) "
+                "VALUES ('C002', $1, $2, 'reminder', 'wrong_number')",
+                NOW - timedelta(days=30), uuid.UUID(SESSION))
+            await conn.execute("DELETE FROM call_attempts WHERE customer_id = 'C002' "
+                               "AND attempted_at > $1", NOW - timedelta(days=30))
+            s = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+            return s.number_check_hold("C002"), s.attempt_times("C002")
+        finally:
+            await tr.rollback()
+            await conn.close()
+
+    hold, times = asyncio.run(go())
+    assert hold["outcome"] == "wrong_number" and len(times) == 1
+
+
+async def _wrong_number_only(conn, phone):
+    """C002's only finished attempt: a wrong-number call to `phone`."""
+    from tools.store import phone_hash
+    await conn.execute("DELETE FROM call_attempts WHERE customer_id = 'C002'")
+    return await conn.fetchval(
+        "INSERT INTO call_attempts (customer_id, attempted_at, session_id, kind, outcome, phone_hash) "
+        "VALUES ('C002', $1, $2, 'reminder', 'wrong_number', $3) RETURNING id",
+        NOW - timedelta(days=1), uuid.UUID(SESSION), phone_hash(phone))
+
+
+def _c002_phone():
+    customers, _ = load_company_data()
+    return next(c["phone"] for c in customers if c["id"] == "C002")
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_clearing_the_number_check_marks_one_row_and_lifts_the_hold():
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        tr = await _begin(conn)
+        try:
+            attempt_id = await _wrong_number_only(conn, _c002_phone())
+            before = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+            first = await PostgresStore.clear_number_check(conn, "C002", NOW)
+            second = await PostgresStore.clear_number_check(conn, "C002", NOW)
+            after = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+            rows = await conn.fetch(
+                "SELECT id, outcome, number_checked_at FROM call_attempts WHERE customer_id = 'C002'")
+            return attempt_id, before, first, second, after, rows
+        finally:
+            await tr.rollback()
+            await conn.close()
+
+    attempt_id, before, first, second, after, rows = asyncio.run(go())
+    assert before.number_check_hold("C002") is not None
+    assert first["cleared"] is True and first["attempt"]["id"] == attempt_id
+    assert second == {"cleared": False, "reason": "already_checked", "attempt": second["attempt"]}
+    assert [(r["id"], r["outcome"], r["number_checked_at"]) for r in rows] == [(attempt_id, "wrong_number", NOW)]
+    assert after.number_check_hold("C002") is None
+    acts = run_due_followups(after, NOW, record_attempts=False)
+    assert not any(a.get("reason") == "needs_number_check" for a in acts)
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_a_changed_phone_number_lifts_the_hold_by_itself():
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        tr = await _begin(conn)
+        try:
+            await _wrong_number_only(conn, "+91 90000 00000")  # not C002's number now
+            changed = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+            await _wrong_number_only(conn, _c002_phone())
+            same = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+            return changed, same
+        finally:
+            await tr.rollback()
+            await conn.close()
+
+    changed, same = asyncio.run(go())
+    assert changed.number_check_hold("C002") is None
+    assert same.number_check_hold("C002") is not None
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_the_call_saves_the_dialled_numbers_hash():
+    from tools.store import phone_hash
+
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        tr = await _begin(conn)
+        try:
+            s = await PostgresStore.load(DSN, ["C002"], clock=lambda: NOW, conn=conn)
+            s.add_attempt("C002", NOW, SESSION, "reminder", phone=_c002_phone())
+            await s.flush(conn=conn)
+            return await conn.fetchval("SELECT phone_hash FROM call_attempts WHERE session_id = $1",
+                                       uuid.UUID(SESSION))
+        finally:
+            await tr.rollback()
+            await conn.close()
+
+    saved = asyncio.run(go())
+    assert saved == phone_hash(_c002_phone()) and _c002_phone() not in saved

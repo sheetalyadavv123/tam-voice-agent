@@ -27,9 +27,12 @@ def extract_turns(history):
 
 
 async def save_call(session_id, room_name, channel, started_at, ended_at, turns,
-                    outcome=None, metadata=None):
+                    outcome=None, metadata=None, conn=None):
+    """conn: an open connection to use (tests pass one inside a rolled-back transaction)."""
     duration = int((ended_at - started_at).total_seconds())
-    conn = await asyncpg.connect(config.DATABASE_URL)
+    own = conn is None
+    if own:
+        conn = await asyncpg.connect(config.DATABASE_URL)
     try:
         async with conn.transaction():
             await conn.execute(
@@ -58,4 +61,5 @@ async def save_call(session_id, room_name, channel, started_at, ended_at, turns,
                  for i, t in enumerate(turns)],
             )
     finally:
-        await conn.close()
+        if own:
+            await conn.close()

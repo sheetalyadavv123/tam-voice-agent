@@ -184,13 +184,28 @@ class Collector(Agent):
         line = self._hardship_reply(turn_ctx, text)
         if line:
             return line, False
+        line = self._cant_commit_reply(text)
+        if line:
+            return line, False
         return self._colleague_time_reply(text)
+
+    def _cant_commit_reply(self, text):
+        """A verified relative who can't say when the customer will pay ("pata nahi, unse
+        hi poochna padega"): no promise; the code asks when to reach the customer, and the
+        flow reads the time, books the callback and closes."""
+        call = self.call
+        if (not self._talking_to_someone_else() or call.promise_recorded or call.push_stopped
+                or call.hardship is not None or self.flow.couldnt_commit
+                or call.store.links_sent_in_session(call.session_id)
+                or not caller_words.cant_commit(text) or self._pay_date_named(text)):
+            return None
+        return self.flow.cant_commit(text, self.language.current).line
 
     async def _identity_reply(self, text):
         """The answer to "am I speaking with Sunita?". A clear yes unlocks the call and the
         code gives the reminder; someone else starts the third-party flow."""
         call, name = self.call, self.call.first_name
-        if caller_words.someone_else(text, name):
+        if caller_words.wrong_number(text, name) or caller_words.someone_else(text, name):
             return await self._flow_reply(self.flow.start(text, self.language.current))
         if caller_words.only_filler(text) and self.identity_asks < 2:
             self.identity_asks += 1
@@ -664,7 +679,8 @@ async def entrypoint(ctx: agents.JobContext):
         logger.warning("TEST_MODE is on: calling hours and attempt limits are skipped, "
                        "and this call is not counted as an attempt")
     else:
-        store.add_attempt(customer_id, rules.now_ist(), str(session_id), kind)
+        store.add_attempt(customer_id, rules.now_ist(), str(session_id), kind,
+                          phone=customer.get("phone"))  # its hash: a later change lifts a wrong-number hold
 
     call = Call(store, customer_id, session_id=str(session_id), clock=rules.now_ist)
 

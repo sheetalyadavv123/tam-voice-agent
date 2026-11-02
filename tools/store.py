@@ -5,6 +5,7 @@ PostgresStore (tools/pg_store.py) is a MemoryStore that is loaded from Neon befo
 call and saves its changes afterwards.
 """
 import copy
+import hashlib
 import json
 import uuid
 from datetime import date
@@ -17,6 +18,13 @@ LINK_BASE_URL = "https://pay.example.test/l/"  # .test is reserved, so it never 
 CHANNELS = {"sms", "whatsapp"}
 PROMISE_STATUSES = {"open", "kept", "broken", "cancelled"}
 CALLBACK_STATUSES = {"open", "done", "cancelled"}
+
+
+def phone_hash(phone):
+    """SHA-256 of the number's digits (None without digits): tells a changed number apart
+    without saving the number again."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return hashlib.sha256(digits.encode()).hexdigest() if digits else None
 
 
 def load_company_data():
@@ -72,9 +80,11 @@ class MemoryStore:
         return dict(p)
 
     # ---- call attempts ----
-    def add_attempt(self, customer_id, at, session_id=None, kind="reminder", outcome=None):
+    def add_attempt(self, customer_id, at, session_id=None, kind="reminder", outcome=None, phone=None):
+        """phone: the number dialled; only its hash is kept, to notice when it changes."""
         self._attempts.append({"customer_id": customer_id, "at": at, "session_id": session_id,
-                               "kind": kind, "outcome": outcome, "loaded": False})
+                               "kind": kind, "outcome": outcome, "loaded": False,
+                               "phone_hash": phone_hash(phone), "number_checked_at": None})
 
     def set_attempt_outcome(self, session_id, outcome):
         for a in self._attempts:
@@ -86,6 +96,24 @@ class MemoryStore:
 
     def attempts_for(self, customer_id):
         return [dict(a) for a in self._attempts if a["customer_id"] == customer_id]
+
+    def number_check_hold(self, customer_id):
+        """The wrong-number attempt that holds this customer's calls, or None.
+        The hold is the latest finished attempt (one with an outcome; a call in progress
+        or one the scheduler just planned doesn't count) when it was a wrong number, and
+        ends when a person marked the number checked (scripts/clear_number_check.py) or
+        the phone number in the company records changed since that call. An attempt saved
+        before phone hashes were kept can't show a change, so only a person clears it."""
+        done = [a for a in self._attempts if a["customer_id"] == customer_id and a["outcome"]]
+        if not done:
+            return None
+        latest = max(done, key=lambda a: a["at"])
+        if latest["outcome"] != "wrong_number" or latest.get("number_checked_at"):
+            return None
+        dialled = latest.get("phone_hash")
+        if dialled and dialled != phone_hash(self.get_customer(customer_id).get("phone")):
+            return None  # the number was changed after the wrong-number call
+        return dict(latest)
 
     # ---- promises to pay ----
     def add_promise(self, customer_id, promised_date, amount, session_id=None, note=None):
