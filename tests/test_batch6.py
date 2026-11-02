@@ -190,18 +190,49 @@ def ask():
     return TimeAsk(lambda: NOW)
 
 
+DAY_ONLY = "caller gave day only"
+ANY_TIME = "caller said any time"
+
+
 def test_a_day_alone_asks_once_for_the_time():
     a = ask()
     assert a.read("kal") == {"ask_time": date(2026, 10, 29)}
-    assert a.read("pata nahi kab") == {"when": THURSDAY_11, "day_only": True}
+    assert a.read("pata nahi kab") == {"when": THURSDAY_11, "day_only": True, "note": DAY_ONLY}
 
 
-@pytest.mark.parametrize("second", ["koi bhi time", "pata nahi", "jab marzi", "nahi pata",
-                                    "कोई भी टाइम", "any time"])
+@pytest.mark.parametrize("second", ["pata nahi", "nahi pata", "dekhte hain", "hmm"])
 def test_no_time_after_asking_books_the_default_hour(second):
     a = ask()
     assert a.read("Monday") == {"ask_time": date(2026, 11, 2)}
-    assert a.read(second) == {"when": MONDAY_11, "day_only": True}
+    assert a.read(second) == {"when": MONDAY_11, "day_only": True, "note": DAY_ONLY}
+
+
+@pytest.mark.parametrize("second", ["koi bhi time", "jab marzi", "कोई भी टाइम", "any time"])
+def test_any_time_after_asking_books_the_default_hour(second):
+    a = ask()
+    a.read("Monday")
+    assert a.read(second) == {"when": MONDAY_11, "day_only": True, "note": ANY_TIME}
+
+
+@pytest.mark.parametrize("text", [
+    "any time Monday", "Monday anytime", "call me Monday, whenever", "Monday koi bhi time",
+    "किसी भी time call कर लेना Monday", "Monday kabhi bhi", "jab chahe Monday", "Monday जब चाहे",
+    "Monday any time is fine", "सोमवार कभी भी"])
+def test_any_time_with_a_day_books_at_once(text):
+    assert ask().read(text) == {"when": MONDAY_11, "day_only": True, "note": ANY_TIME}
+
+
+def test_any_time_then_the_day_in_the_next_answer():
+    a = ask()
+    assert a.read("whenever") == {"missing": "both"}  # no day yet: the flow asks for it
+    assert a.read("Monday") == {"ask_time": date(2026, 11, 2)}
+
+
+def test_the_time_is_asked_once_even_when_the_flow_asked_it():
+    a = ask()
+    a.read("kal shaam")  # the flow said "please tell me the time"
+    a.mark_asked()
+    assert a.read("pata nahi") == {"when": THURSDAY_11, "day_only": True, "note": DAY_ONLY}
 
 
 def test_a_time_after_asking_is_for_that_day():
@@ -213,12 +244,16 @@ def test_a_time_after_asking_is_for_that_day():
 def test_a_new_day_after_asking_moves_the_default_booking():
     a = ask()
     a.read("kal")
-    assert a.read("nahi, Monday") == {"when": MONDAY_11, "day_only": True}
+    assert a.read("nahi, Monday") == {"when": MONDAY_11, "day_only": True, "note": DAY_ONLY}
 
 
-@pytest.mark.parametrize("text", ["kal shaam", "20 November", "aaj"])
+def test_a_day_with_a_part_of_the_day_asks_for_the_hour():
+    assert ask().read("kal shaam") == {"ask_time": date(2026, 10, 29)}
+
+
+@pytest.mark.parametrize("text", ["20 November", "aaj", "20 November koi bhi time"])
 def test_not_day_only_keeps_the_usual_handling(text):
-    # a part of the day; too far; today, when 11 am has passed (it is 11:00 now)
+    # too far; today, when 11 am has passed (it is 11:00 now)
     assert ask().read(text) == {"missing": "time"}
 
 
@@ -284,8 +319,8 @@ def test_hardship_day_only():
     hear(agent, "koi bhi time")
     assert session.said[-1] == says(caller_words.HANDOFF_CLOSE_DAY, day="Monday 2 November")
     assert session.closed is True
-    assert _callbacks(store) == [("human_followup", MONDAY_11, "caller gave day only")]
-    assert call.outcome == "hardship" and call.note.endswith("caller gave day only")
+    assert _callbacks(store) == [("human_followup", MONDAY_11, "caller said any time")]
+    assert call.outcome == "hardship" and call.note.endswith("caller said any time")
 
 
 def test_hardship_pata_nahi_without_a_day_still_closes_without_a_time():
@@ -307,8 +342,8 @@ def test_customer_busy_day_only(caplog):
         assert hear(agent, "koi bhi time") is True
     assert session.said[-1] == says(caller_words.CALL_LATER_CLOSE_DAY, day="Monday 2 November")
     assert session.closed is True
-    assert _callbacks(store) == [("customer_requested", MONDAY_11, "caller gave day only")]
-    assert call.outcome == "callback_requested" and call.note == "caller gave day only"
+    assert _callbacks(store) == [("customer_requested", MONDAY_11, "caller said any time")]
+    assert call.outcome == "callback_requested" and call.note == "caller said any time"
     assert not call.unlocked and "RULE call_later_close" in caplog.text
 
 

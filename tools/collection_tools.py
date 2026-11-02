@@ -29,6 +29,7 @@ HANDOFF_AFTER_PROMISE = {"legal_question", "hardship", "dispute", "customer_aske
 # After one of these the payment push is over: a colleague takes it from here.
 STOP_PUSH = {"hardship", "dispute"}
 DAY_ONLY_NOTE = "caller gave day only"  # the callback's hour is DEFAULT_CALLBACK_HOUR
+ANY_TIME_NOTE = "caller said any time"  # the same, after "any time" / "koi bhi time"
 
 PersonStatus = Literal["customer", "third_party", "unavailable"]
 Channel = Literal["sms", "whatsapp"]
@@ -385,13 +386,16 @@ class Call:
     def schedule_callback(self, day, month, year, hour, minute, reason):
         return self._schedule(day, month, year, hour, minute, reason)
 
-    def schedule_day_only(self, day, month, year, reason):
+    def schedule_day_only(self, day, month, year, reason, note=DAY_ONLY_NOTE):
         """Code only, never the AI: the caller named a day but no time, even when asked
-        once, so the call is booked at DEFAULT_CALLBACK_HOUR on that day."""
+        once, or said "any time", so the call is booked at DEFAULT_CALLBACK_HOUR."""
+        if note not in (DAY_ONLY_NOTE, ANY_TIME_NOTE):
+            return {"saved": False, "error": "invalid_note"}
         return self._schedule(day, month, year, policy.DEFAULT_CALLBACK_HOUR, 0, reason,
-                              day_only=True)
+                              day_only=note)
 
-    def _schedule(self, day, month, year, hour, minute, reason, day_only=False):
+    def _schedule(self, day, month, year, hour, minute, reason, day_only=None):
+        """day_only: the note for a booking at the default hour, else None."""
         if self.person_status is None:
             return {"error": "confirm_person_first"}
         if reason not in CALLBACK_REASONS:
@@ -410,10 +414,10 @@ class Call:
         check = rules.validate_callback_time(due, self.clock())
         if not check["ok"]:
             return {"saved": False, "reason": check["reason"], "next": "suggest_a_time_in_calling_hours"}
-        note = DAY_ONLY_NOTE if day_only else None
+        note = day_only or None
         if day_only:
-            logger.info("RULE callback_day_only: no time given, booked %s at the default hour",
-                        due.isoformat())
+            logger.info("RULE callback_day_only: %s, booked %s at the default hour",
+                        note, due.isoformat())
         if self.handoff_callback_id is not None:
             # transfer_to_human already booked a colleague: move that call, don't add another
             self.store.set_callback_due(self.handoff_callback_id, due, note)

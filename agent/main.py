@@ -25,10 +25,10 @@ from livekit.plugins import (
 import config
 import db
 from tools import caller_words, dates, rules, schema_check
-from tools.call_later import CallLaterFlow, asks_call_later
-from tools.callback_ask import TimeAsk, book, say_day
+from tools.call_later import CallLaterFlow, asks_call_later, busy_before_identity
+from tools.callback_ask import TimeAsk, book, say_day, says_any_time
 from tools.collection_tools import (
-    DAY_ONLY_NOTE, AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
+    AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
 )
 from tools.dates import say_when
 from tools.language import LanguageTracker, turn_language
@@ -142,6 +142,8 @@ class Collector(Agent):
         self.time_misses = 0  # hardship callback: answers without a usable time
         self.time_ask = TimeAsk(call.clock)  # hardship callback: a day without a time
         self.later = CallLaterFlow(call)  # the customer asks to be called later
+        self.busy_text = None  # "I'm busy" before any yes, while we ask who it is
+        self.busy_asked = False  # that question is asked once per call
         self._end_task = None
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
@@ -257,10 +259,34 @@ class Collector(Agent):
             return None
         return self.flow.cant_commit(text, self.language.current).line
 
+    async def _after_busy(self, text):
+        """The answer to the identity question asked after "I'm busy". A clear yes: the
+        call-later flow. Someone else: the third-party flow. Anything else: the callback
+        is booked anyway, as customer_unavailable, and nothing is shared. The day or "any
+        time" may be in either message, so both are read."""
+        call, name, lang = self.call, self.call.first_name, self.language.current
+        busy, self.busy_text = self.busy_text, None
+        if caller_words.wrong_number(text, name) or caller_words.someone_else(text, name):
+            return await self._flow_reply(self.flow.start(text, lang))
+        confirmed = caller_words.confirms_identity(text, name)
+        call.report_person("unavailable")
+        logger.info("RULE identity_busy_answer: %r, %s", text[:60],
+                    "confirmed, asking when to call" if confirmed
+                    else "not confirmed, booking the callback and sharing nothing")
+        reply = self.later.start(f"{busy} . {text}", lang, confirmed=confirmed)
+        return reply.line, reply.hang_up
+
     async def _identity_reply(self, text):
         """The answer to "am I speaking with Sunita?". A clear yes unlocks the call and the
         code gives the reminder; someone else starts the third-party flow."""
         call, name = self.call, self.call.first_name
+        if self.busy_text is not None:  # we asked who it is after "I'm busy, call me Monday"
+            return await self._after_busy(text)
+        if not self.busy_asked and busy_before_identity(text, name):
+            # "Actually, I'm quite occupied... call me on Monday?": no yes, so ask once
+            self.busy_text, self.busy_asked = text, True
+            logger.info("RULE identity_busy_unconfirmed: %r, asking who it is once", text[:60])
+            return self._identity_question(), False
         if caller_words.wrong_number(text, name) or caller_words.someone_else(text, name):
             return await self._flow_reply(self.flow.start(text, self.language.current))
         if caller_words.only_filler(text) and self.identity_asks < 2:
@@ -374,7 +400,8 @@ class Collector(Agent):
         if not call.push_stopped or call.callback_confirmed:
             return None, False
         strict = call.hardship == "no_date"
-        if strict and DONT_KNOW.search(text) and not self.time_ask.waiting:
+        if (strict and DONT_KNOW.search(text) and not self.time_ask.waiting
+                and not says_any_time(text)):
             return self._handoff_close(None)
         said = self.time_ask.read(text)  # "kal" alone: asked once for the time, then the default hour
         if "ask_time" in said:
@@ -382,27 +409,28 @@ class Collector(Agent):
                         said["ask_time"])
             return self._line(caller_words.TIME_FOR_DAY, day=say_day(said["ask_time"])), False
         if "when" in said:
-            w, day_only = said["when"], said.get("day_only", False)
             result = self._run("schedule_callback", book, call, said, "customer_requested")
             if result.get("saved"):
-                return self._handoff_close(w, day_only)
+                return self._handoff_close(said["when"], said.get("note"))
         elif not strict:
             return None, False
         self.time_misses += 1
         if strict and self.time_misses >= MAX_TIME_MISSES:
             return self._handoff_close(None)
+        self.time_ask.mark_asked()  # the time is asked for once at most
         if "when" in said:
             return time_outside_line(self.language.current), False
         return self._line(caller_words.TIME_INCOMPLETE), False
 
-    def _handoff_close(self, when, day_only=False):
+    def _handoff_close(self, when, note=None):
+        """note: "caller gave day only" / "caller said any time" for the default hour."""
         if when is None:
             logger.info("RULE handoff_close: no time given, colleague calls at the next window")
             return self._line(caller_words.HANDOFF_CLOSE_NO_TIME, name=self.call.first_name), True
-        if day_only:
-            self.call.note = (self.call.note + "; " if self.call.note else "") + DAY_ONLY_NOTE
-            logger.info("RULE handoff_close: colleague callback on %s (day only), ending the call",
-                        when.date().isoformat())
+        if note:
+            self.call.note = (self.call.note + "; " if self.call.note else "") + note
+            logger.info("RULE handoff_close: colleague callback on %s (%s), ending the call",
+                        when.date().isoformat(), note)
             return self._line(caller_words.HANDOFF_CLOSE_DAY, name=self.call.first_name,
                               day=say_day(when)), True
         logger.info("RULE handoff_close: colleague callback at %s, ending the call", when.isoformat())
@@ -521,20 +549,31 @@ class Collector(Agent):
         except RuntimeError:
             pass  # no job (text tests)
 
+    def asked_to_call_later(self):
+        """The customer asked to be called later (or said they're busy before saying who
+        they are): we call them back ourselves; a "colleague" is never mentioned."""
+        return (self.later.active or self.later.done or self.busy_text is not None
+                or self.call.person_status == "unavailable")
+
+    def _guard(self):
+        """The ReplyGuard for the AI's next reply. "I'll try them later" is only for
+        someone else. Before anyone is confirmed the fallback asks who it is; a customer
+        who still owes a DOB is asked for it."""
+        someone_else = self.call.person_status == "third_party"
+        return ReplyGuard(self.language.current, locked=not self.call.unlocked,
+                          third_party=someone_else and not self.call.unlocked,
+                          locked_fallback=None if someone_else else self._step_line(),
+                          greeted=True,  # the code spoke the greeting before any AI turn
+                          step_fallback=self._step_line(),
+                          no_push=bool(self.call.push_stopped),
+                          no_callback_talk=self.call.hardship == "with_date",
+                          no_colleague=self.asked_to_call_later(),
+                          third_person=(self.call.first_name if self._talking_to_someone_else()
+                                        else None))
+
     async def llm_node(self, chat_ctx, tools, model_settings: ModelSettings):
         # Every reply passes through ReplyGuard before it is spoken or saved.
-        # "I'll try them later" is only for someone else. Before anyone is confirmed the
-        # fallback asks who it is; a customer who still owes a DOB is asked for it.
-        someone_else = self.call.person_status == "third_party"
-        guard = ReplyGuard(self.language.current, locked=not self.call.unlocked,
-                           third_party=someone_else and not self.call.unlocked,
-                           locked_fallback=None if someone_else else self._step_line(),
-                           greeted=True,  # the code spoke the greeting before any AI turn
-                           step_fallback=self._step_line(),
-                           no_push=bool(self.call.push_stopped),
-                           no_callback_talk=self.call.hardship == "with_date",
-                           third_person=(self.call.first_name if self._talking_to_someone_else()
-                                         else None))
+        guard = self._guard()
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             if isinstance(chunk, str):
                 text = guard.feed(chunk)

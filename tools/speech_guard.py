@@ -332,7 +332,8 @@ class ReplyGuard:
     def __init__(self, language: str, locked: bool = False, third_party: bool = False,
                  locked_fallback: str | None = None, greeted: bool = False,
                  step_fallback: str | None = None, no_push: bool = False,
-                 no_callback_talk: bool = False, third_person: str | None = None):
+                 no_callback_talk: bool = False, third_person: str | None = None,
+                 no_colleague: bool = False):
         self.language = language
         self.locked = locked
         self.third_party = third_party
@@ -345,6 +346,8 @@ class ReplyGuard:
         self.no_push = no_push  # hardship or dispute: never ask for payment again
         self.no_callback_talk = no_callback_talk  # hardship with a date: no colleague, no callback
         self.third_person = third_person  # the customer's name, when talking to someone else
+        # the customer asked to be called later: we call them back, not a colleague
+        self.no_colleague = no_colleague
         self.said_try_again = False
         self.buffer = ""
         self.spoken = 0
@@ -384,6 +387,9 @@ class ReplyGuard:
             return ""
         if self.no_callback_talk and (COLLEAGUE.search(sentence) or CALLBACK_TALK.search(sentence)):
             self.events.append(("callback_after_hardship_promise", sentence))
+            return ""
+        if self.no_colleague and COLLEAGUE.search(sentence):
+            self.events.append(("colleague_in_call_later", sentence))
             return ""
         if self.third_person:
             spoken_about = sentence
