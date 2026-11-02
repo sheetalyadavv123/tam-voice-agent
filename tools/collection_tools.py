@@ -30,6 +30,7 @@ HANDOFF_AFTER_PROMISE = {"legal_question", "hardship", "dispute", "customer_aske
 STOP_PUSH = {"hardship", "dispute"}
 DAY_ONLY_NOTE = "caller gave day only"  # the callback's hour is DEFAULT_CALLBACK_HOUR
 ANY_TIME_NOTE = "caller said any time"  # the same, after "any time" / "koi bhi time"
+NO_TIME_NOTE = "no time given, default hour"  # the next day at DEFAULT_CALLBACK_HOUR
 
 PersonStatus = Literal["customer", "third_party", "unavailable"]
 Channel = Literal["sms", "whatsapp"]
@@ -394,8 +395,28 @@ class Call:
         return self._schedule(day, month, year, policy.DEFAULT_CALLBACK_HOUR, 0, reason,
                               day_only=note)
 
-    def _schedule(self, day, month, year, hour, minute, reason, day_only=None):
-        """day_only: the note for a booking at the default hour, else None."""
+    def far_date_handoff(self, when, offered_note, day_only=None):
+        """Code only, never the AI: the caller's pay date is beyond MAX_PROMISE_DAYS even
+        after one try for an earlier one. A colleague calls at `when` to confirm it; the
+        callback and the call carry offered_note ("customer offered 12 November, beyond
+        limit") so the colleague knows the date. day_only: the note when `when` is at the
+        default hour (the caller gave a day only, or no time at all)."""
+        if self.promise_recorded:
+            return {"saved": False, "reason": "promise_already_recorded"}
+        result = self._schedule(when.day, when.month, when.year, when.hour, when.minute,
+                                "human_followup", day_only=day_only, note=offered_note)
+        if not result.get("saved"):
+            return result
+        self.handoff_requested = True
+        self.handoff_callback_id = self.callback_id
+        note = "; ".join(x for x in (offered_note, day_only) if x)
+        self.record_outcome("human_callback", note)
+        logger.info("RULE promise_date_far_handoff: %s, colleague call at %s", note, when.isoformat())
+        return result
+
+    def _schedule(self, day, month, year, hour, minute, reason, day_only=None, note=None):
+        """day_only: the note for a booking at the default hour, else None. note: more for
+        the callback's note, from the code only."""
         if self.person_status is None:
             return {"error": "confirm_person_first"}
         if reason not in CALLBACK_REASONS:
@@ -414,7 +435,7 @@ class Call:
         check = rules.validate_callback_time(due, self.clock())
         if not check["ok"]:
             return {"saved": False, "reason": check["reason"], "next": "suggest_a_time_in_calling_hours"}
-        note = day_only or None
+        note = "; ".join(x for x in (note, day_only) if x) or None
         if day_only:
             logger.info("RULE callback_day_only: %s, booked %s at the default hour",
                         note, due.isoformat())

@@ -24,13 +24,14 @@ from livekit.plugins import (
 
 import config
 import db
-from tools import caller_words, dates, rules, schema_check
+from tools import caller_words, dates, relative_dates, rules, schema_check
 from tools.call_later import CallLaterFlow, asks_call_later, busy_before_identity
 from tools.callback_ask import TimeAsk, book, say_day, says_any_time
 from tools.collection_tools import (
     AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
 )
 from tools.dates import say_when
+from tools.far_date import FarDateFlow, say_date
 from tools.language import LanguageTracker, turn_language
 from tools.speech_guard import ReplyGuard
 from tools.third_party import DONT_KNOW, MAX_TIME_MISSES, ThirdPartyFlow, time_outside_line
@@ -144,6 +145,7 @@ class Collector(Agent):
         self.later = CallLaterFlow(call)  # the customer asks to be called later
         self.busy_text = None  # "I'm busy" before any yes, while we ask who it is
         self.busy_asked = False  # that question is asked once per call
+        self.far = FarDateFlow(call)  # a pay date beyond MAX_PROMISE_DAYS
         self._end_task = None
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
@@ -166,14 +168,19 @@ class Collector(Agent):
             turn_ctx.add_message(role="system", content=(
                 f"The caller just confirmed they are {self.call.first_name}. "
                 "Call report_person with status customer now."))
+        self._add_days_note(turn_ctx, text)
+
+    def _add_days_note(self, turn_ctx, text):
+        """The days the caller named ("Friday", "दस दिन बाद", "12 को"), as dates, for the AI."""
         today = self.call.clock().date()
-        days = dates.note_for(text, today)
-        if days and turn_ctx is not None:
+        days = relative_dates.note_for(text, today)
+        if days:
             logger.info("RULE weekday_resolved: %s", days)
+        if days and turn_ctx is not None:
             turn_ctx.add_message(role="system", content=(
                 f"The caller named these days (IST): {days}. Use exactly these dates."))
             promise = self.call.promise
-            new = [d for _, d in dates.days_named(text, today)]
+            new = [d for _, d in relative_dates.pay_dates(text, today)]
             if promise and promise["date"] not in new:
                 logger.info("RULE promise_date_change: caller named %s, promise is %s",
                             new[-1], promise["date"])
@@ -218,6 +225,8 @@ class Collector(Agent):
         if self.later.active:
             reply = self.later.hear(text, self.language.current)
             return reply.line, reply.hang_up
+        if self.far.active:
+            return self._far_reply(turn_ctx, text)
         if call.person_status is None:
             reply = await self._identity_reply(text)
             if reply[0] or call.person_status is None:
@@ -229,6 +238,9 @@ class Collector(Agent):
         if line:
             return line, False
         line = self._cant_commit_reply(text)
+        if line:
+            return line, False
+        line = self._far_date_start(text)
         if line:
             return line, False
         line, hang_up = self._call_later_reply(text)
@@ -246,6 +258,45 @@ class Collector(Agent):
             return None, False
         reply = self.later.start(text, self.language.current)
         return reply.line, reply.hang_up
+
+    def _far_date_start(self, text, offered=None):
+        """A pay date beyond MAX_PROMISE_DAYS ("दस दिन बाद pay कर दूंगी"): the code asks once
+        for one within the limit. offered: the date, when the AI's record_promise_to_pay
+        found it too far; else it is read from the caller's words."""
+        call = self.call
+        if (not call.unlocked or call.promise_recorded or call.push_stopped
+                or self.far.state is not None):
+            return None
+        if offered is None:
+            if asks_call_later(text):  # "10 din baad call karna" is not a pay date
+                return None
+            offered = self.far.far_date(text)
+        if offered is None:
+            return None
+        return self.far.start(offered, self.language.current).line
+
+    def _far_reply(self, turn_ctx, text):
+        """The answer to "can you pay by <latest>?", then to "when may the colleague call?"."""
+        lang = self.language.current
+        if self.far.state == "time":
+            reply = self.far.hear_time(text, lang)
+            return reply.line, reply.hang_up
+        kind, value = self.far.answer(text, lang)
+        if kind == "colleague":
+            return value.line, value.hang_up
+        d = value
+        result = self._run("record_promise_to_pay", self.call.record_promise_to_pay,
+                           d.day, d.month, d.year)
+        if not result.get("saved"):
+            return None, False  # the AI answers from the tool result
+        logger.info("RULE promise_by_code: %s, recorded as usual", d)
+        if turn_ctx is not None:
+            turn_ctx.add_message(role="system", content=(
+                f"The caller agreed to pay by {dates.say(d)}. The code already called "
+                f"record_promise_to_pay and it is saved ({say_date(d)}). Confirm the amount "
+                "and date in one sentence, then offer the payment link once. Don't mention a "
+                "colleague or a call back."))
+        return None, False
 
     def _cant_commit_reply(self, text):
         """A verified relative who can't say when the customer will pay ("pata nahi, unse
@@ -360,8 +411,7 @@ class Collector(Agent):
 
     def _pay_date_named(self, text):
         today = self.call.clock().date()
-        return bool(dates.days_named(text, today) or dates.dates_said(text, today)
-                    or caller_words.PAY_DAY.search(text))
+        return bool(relative_dates.pay_dates(text, today) or caller_words.PAY_DAY.search(text))
 
     def _hardship_reply(self, turn_ctx, text):
         """Hardship, read from the caller's words. With a day to pay, the AI records the
@@ -469,7 +519,7 @@ class Collector(Agent):
         return self._line(caller_words.DOB_QUESTION, name=self.call.first_name)
 
     def _names_a_day(self, text):
-        return bool(dates.days_named(text, self.call.clock().date())
+        return bool(relative_dates.pay_dates(text, self.call.clock().date())
                     or caller_words.said_a_date([text]))
 
     def _identity_question(self):
@@ -688,6 +738,12 @@ class Collector(Agent):
             year: Full four-digit year, for example 2026.
         """
         result = self._run("record_promise_to_pay", self.call.record_promise_to_pay, day, month, year)
+        if result.get("reason") == "too_far":
+            # the code asks once for an earlier date, never the AI's "a colleague will call"
+            line = self._far_date_start("", offered=rules.make_date(day, month, year))
+            if line:
+                self._say(line)
+                raise StopResponse()
         if result.get("saved") and self.call.link_waiting:
             # the caller asked for the link before the promise was saved; send it now
             self.call.link_waiting = False

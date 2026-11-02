@@ -86,3 +86,37 @@ for an exact time four times and ended with "a colleague will call you", booking
 (`busy_before_identity`, `GREETING_CALL_LATER`), `tools/callback_ask.py` (`ANY_TIME`,
 `mark_asked`), `tools/speech_guard.py` (`no_colleague`), `agent/main.py`
 (`_after_busy`, `_guard`).
+
+## 2026-11-02: Relative pay dates, and a date beyond the limit
+
+A Console caller said "मैं इसको दस दिन बाद pay कर दूंगी" and got only "हमारी एक सहयोगी
+आपको वापस कॉल करेंगी", with no explanation.
+
+- **Relative dates are worked out by the code (IST)**, like weekdays, and added to the
+  turn ("दस दिन बाद = Thursday 12 November"):
+  - "10 din baad", "दस दिन बाद", "in 10 days": today + 10.
+  - "ek hafte mein", "in a week": + 7. "2 hafte baad", "two weeks": + 14.
+  - "agle hafte", "next week": today + 7. With a weekday ("agle hafte Friday"), that
+    weekday in the next calendar week.
+  - "mahine ke end tak", "month end": the last day of this month.
+  - A day of the month ("12 को", "9 तक", "15 tareekh", "by the 12th"): that day this
+    month, or next month once it has passed.
+- **The limit is `MAX_PROMISE_DAYS`** (default 7, already used for callbacks): the last
+  allowed pay date is today + MAX_PROMISE_DAYS.
+- **Too far: one try for earlier, in code.** "ठीक है, {date} नोट किया। क्या आप {latest} तक
+  pay कर पाएंगे?" A date within the limit, or a plain yes (= the last allowed day), is
+  recorded as a promise as usual and the AI carries on (amount, date, link).
+- **Still too far** (the same or another far date, a no, "nahi ho payega", anything
+  else): "ठीक है, {date} के लिए हमारी एक सहयोगी आपसे बात करके confirm करेंगी।", followed by
+  the one question for the time. Whatever the answer, the colleague's callback
+  (human_followup) is booked and the call closes. The caller's time, or their day at
+  DEFAULT_CALLBACK_HOUR, or, with nothing usable, the next DEFAULT_CALLBACK_HOUR. Outcome
+  human_callback, note "customer offered {date}, beyond limit" on the call and the
+  callback.
+- If the AI's own record_promise_to_pay gets "too far", the code takes over with the same
+  question. The AI never says "a colleague will call" about a date.
+- "10 din baad call karna" is a call-later request, not a pay date.
+
+**Where.** `tools/relative_dates.py`, `tools/far_date.py`, `tools/collection_tools.py`
+(`far_date_handoff`), `tools/callback_ask.py` (`next_default_slot`), `agent/main.py`
+(`_add_days_note`, `_far_date_start`, `_far_reply`).

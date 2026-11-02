@@ -504,6 +504,29 @@ def test_a_callback_with_a_time_saves_no_note():
     assert [r["note"] for r in rows["callback_notes"]] == [None]
 
 
+# ---- batch 7: a pay date beyond MAX_PROMISE_DAYS (from NOW, Wed 28 Oct: up to 4 Nov) ----
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_far_date_still_too_far_saves_the_colleague_callback_with_the_offered_date():
+    rows, call = _rolled_back(["haan ji", "मैं इसको दस दिन बाद pay कर दूंगी", "नहीं, 12 को ही",
+                               "kal 4 baje"])
+    assert [tuple(r) for r in rows["callbacks"]] == [
+        ("C002", datetime(2026, 10, 29, 16, 0, tzinfo=IST), "human_followup", "open")]
+    assert [r["note"] for r in rows["callback_notes"]] == ["customer offered 12 November, beyond limit"]
+    assert rows["session"][0]["outcome"] == "human_callback"
+    assert rows["meta"]["note"] == "customer offered 12 November, beyond limit"
+    assert rows["meta"]["handoff_requested"] is True
+    assert rows["promises"] == [] and rows["links"] == []
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_far_date_then_an_earlier_one_saves_the_promise():
+    rows, call = _rolled_back(["haan ji", "मैं इसको दस दिन बाद pay कर दूंगी", "ठीक है, 3 तक कर दूंगी"])
+    assert len(rows["promises"]) == 1 and call.promise["date"] == date(2026, 11, 3)
+    assert rows["callbacks"] == []
+    assert rows["session"][0]["outcome"] == "promise_to_pay"
+
+
 @pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
 def test_schema_check_against_neon_finds_a_dropped_column_and_is_rolled_back():
     from tools import schema_check
