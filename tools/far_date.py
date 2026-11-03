@@ -3,25 +3,23 @@
     far date -> "ठीक है, 12 November नोट किया। क्या आप 9 November तक pay कर पाएंगे?"
         a date within the limit, or a plain yes (= the last allowed day) -> the promise is
             recorded as usual and the AI carries on (amount, date, payment link)
-        anything else (the same or another far date, a no, "nahi ho payega") ->
-            "ठीक है, 12 November के लिए हमारी एक सहयोगी आपसे बात करके confirm करेंगी।
-             उन्हें आपको किस दिन और किस समय कॉल करना ठीक रहेगा?"
-            -> one answer, then the colleague's callback is booked and the call closes:
-               their time, or their day at DEFAULT_CALLBACK_HOUR, or (nothing usable) the
-               next DEFAULT_CALLBACK_HOUR. Outcome human_callback, note "customer offered
-               12 November, beyond limit".
+        the same or another far date, a no, "nahi ho payega" -> the close (below)
+        an answer that can't be read (empty, garbled, another script) -> the same
+            question once more; a second unclear answer -> the close
 
-The earlier date is asked for once; the time for the callback is asked for once.
+    the close: "ठीक है, 12 November थोड़ा आगे की तारीख है। इसके बारे में हमारी टीम से कोई
+        आपसे बात करेगा। धन्यवाद, आपका दिन शुभ हो।" and the call ends. No day or time is asked:
+        a human_followup callback is booked at the next DEFAULT_CALLBACK_HOUR inside the
+        calling hours. Outcome human_callback, note "customer offered 12 November, beyond
+        limit".
 """
 import logging
 import re
 from datetime import timedelta
 
 from tools import caller_words, policy
-from tools.callback_ask import TimeAsk, at_default_hour, next_default_slot, say_day
-from tools.collection_tools import DAY_ONLY_NOTE, NO_TIME_NOTE
-from tools.dates import say_when
-from tools.relative_dates import last_pay_date
+from tools.callback_ask import next_default_slot
+from tools.relative_dates import Offer, last_offer, say_offer
 from tools.third_party import Reply
 
 logger = logging.getLogger("tam-voice-agent")
@@ -32,6 +30,7 @@ CANT_BY = re.compile(
     r"|\bcan'?t\b|\bcannot\b|\bnot\s+possible\b|\bwon'?t\s+be\s+able|\bnot\s+able\b"
     r"|नहीं\s+(?:हो|कर|दे|भर)\s+पा|मुश्किल|मुमकिन\s+नहीं|संभव\s+नहीं|possible\s+नहीं",
     re.I)
+MAX_UNCLEAR = 1  # the earlier-date question is asked once more after an unclear answer
 
 
 def say_date(d):
@@ -39,24 +38,69 @@ def say_date(d):
     return f"{d.day} {d:%B}"
 
 
+def latest_allowed(call):
+    return call.clock().date() + timedelta(days=policy.MAX_PROMISE_DAYS)
+
+
+def far_offer(call, text):
+    """The day (or range: its last day counts) the caller named, if beyond the limit."""
+    o = last_offer(text, call.clock().date())
+    return o if o is not None and o.last > latest_allowed(call) else None
+
+
+def book_followup(call, note, outcome):
+    """The team's call at the next DEFAULT_CALLBACK_HOUR slot (the caller is not asked),
+    with the note on the callback and the call."""
+    when = next_default_slot(call.clock())
+    result = call.far_date_handoff(when, note, outcome) if when else {"saved": False}
+    if not result.get("saved"):
+        logger.warning("RULE promise_date_far_close: no callback could be booked (%s)",
+                       result.get("reason") or result.get("error"))
+        call.handoff_requested = True
+        call.record_outcome(outcome, note)
+    return result
+
+
+def hardship_close(call, offer, lang):
+    """Hardship and a pay date beyond the limit: no push for an earlier date. A fixed kind
+    line, the team's follow-up at the next default slot, outcome hardship, end the call."""
+    note = f"hardship, offered {say_offer(offer, for_note=True)}, beyond limit"
+    book_followup(call, note, "hardship")
+    logger.info("RULE hardship_far_date: %s, no earlier-date question, ending the call", note)
+    tp = call.person_status == "third_party"
+    lines = caller_words.HARDSHIP_FAR_CLOSE_TP if tp else caller_words.HARDSHIP_FAR_CLOSE
+    return Reply(caller_words.line(lines, lang, name=call.first_name, date=say_offer(offer, lang)),
+                 hang_up=True)
+
+
+def hardship_no_date_close(call, lang):
+    """Hardship and no date, even after one question: a fixed kind line, the team's
+    follow-up at the next default slot (no time question), outcome hardship, end the call."""
+    note = "hardship, no pay date"
+    book_followup(call, note, "hardship")
+    logger.info("RULE hardship_no_date: %s, team follow-up, ending the call", note)
+    tp = call.person_status == "third_party"
+    lines = caller_words.HARDSHIP_NO_DATE_CLOSE_TP if tp else caller_words.HARDSHIP_NO_DATE_CLOSE
+    return Reply(caller_words.line(lines, lang, name=call.first_name), hang_up=True)
+
+
 class FarDateFlow:
     def __init__(self, call):
         self.call = call
-        self.state = None  # "asked" (an earlier date), "time" (the colleague's call), "done"
-        self.offered = None  # the far date the caller gave
-        self.ask = TimeAsk(call.clock)
+        self.state = None  # "asked" (an earlier date), then "done"
+        self.offered = None  # the far Offer the caller gave
+        self.unclear = 0
 
     @property
     def active(self):
-        return self.state in ("asked", "time")
+        return self.state == "asked"
 
     def latest(self):
-        return self.call.clock().date() + timedelta(days=policy.MAX_PROMISE_DAYS)
+        return latest_allowed(self.call)
 
     def far_date(self, text):
-        """The pay date the caller named, if it is beyond the limit; else None."""
-        d = last_pay_date(text, self.call.clock().date())
-        return d if d is not None and d > self.latest() else None
+        """The Offer the caller named, if it is beyond the limit; else None."""
+        return far_offer(self.call, text)
 
     def _line(self, lines, lang, **values):
         return caller_words.line(lines, lang, name=self.call.first_name, **values)
@@ -64,68 +108,58 @@ class FarDateFlow:
     def _tp(self):
         return self.call.person_status == "third_party"
 
+    def _earlier_question(self, lang):
+        lines = caller_words.FAR_DATE_EARLIER_TP if self._tp() else caller_words.FAR_DATE_EARLIER
+        return Reply(self._line(lines, lang, date=say_offer(self.offered, lang),
+                                latest=say_date(self.latest())))
+
     def start(self, offered, lang):
-        """Ask once for a date within the limit."""
+        """Ask once for a date within the limit. offered: an Offer, or a date."""
+        if not isinstance(offered, Offer):
+            offered = Offer("", offered, offered)
         self.state, self.offered = "asked", offered
         logger.info("RULE promise_date_far: %s is beyond %d days, asking once for %s or earlier",
-                    offered, policy.MAX_PROMISE_DAYS, self.latest())
-        lines = caller_words.FAR_DATE_EARLIER_TP if self._tp() else caller_words.FAR_DATE_EARLIER
-        return Reply(self._line(lines, lang, date=say_date(offered), latest=say_date(self.latest())))
+                    say_offer(offered), policy.MAX_PROMISE_DAYS, self.latest())
+        return self._earlier_question(lang)
 
     def answer(self, text, lang):
         """The answer to "can you pay by <latest>?". Returns ("promise", date) to record,
-        or ("colleague", Reply) with the line that asks when the colleague may call."""
+        ("ask", Reply) to ask the same question again, or ("close", Reply) to end the call."""
+        text = text or ""
         today = self.call.clock().date()
-        d = last_pay_date(text, today)
-        if not CANT_BY.search(text):
-            if d is not None and today <= d <= self.latest():
-                self.state = "done"
-                logger.info("RULE promise_date_far_earlier: %s accepted", d)
-                return "promise", d
-            if d is None and caller_words.agrees(text):  # "haan, kar dungi": by <latest>
-                self.state = "done"
-                logger.info("RULE promise_date_far_earlier: yes, %s", self.latest())
-                return "promise", self.latest()
+        o = last_offer(text, today)
+        d = o.last if o else None  # a range: its last day
+        no = bool(CANT_BY.search(text))
+        if not no and d is not None and today <= d <= self.latest():
+            self.state = "done"
+            logger.info("RULE promise_date_far_earlier: %s accepted", d)
+            return "promise", d
         if d is not None and d > self.latest():
-            self.offered = d  # "nahi, 15 ko": the colleague hears the latest offer
-        self.state = "time"
-        self.ask.mark_asked()  # this line asks for the time; no second question
-        logger.info("RULE promise_date_far_colleague: %r, %s still beyond the limit",
-                    text[:60], self.offered)
-        lines = caller_words.FAR_DATE_COLLEAGUE_TP if self._tp() else caller_words.FAR_DATE_COLLEAGUE
-        return "colleague", Reply(self._line(lines, lang, date=say_date(self.offered)))
+            self.offered = o  # "nahi, 13 ko": the team hears the latest offer
+            return "close", self.close(text, lang)
+        if not no and d is None and caller_words.agrees(text):  # "haan, kar dungi": by <latest>
+            self.state = "done"
+            logger.info("RULE promise_date_far_earlier: yes, %s", self.latest())
+            return "promise", self.latest()
+        if no or caller_words.DECLINE.search(text):
+            return "close", self.close(text, lang)
+        # can't be read ("నైన్", "ఆండీ", nothing at all): not a no, so ask once more
+        if self.unclear < MAX_UNCLEAR:
+            self.unclear += 1
+            logger.info("RULE promise_date_far_unclear: %r, asking the same question again", text[:60])
+            return "ask", self._earlier_question(lang)
+        return "close", self.close(text, lang)
 
     def offered_note(self):
         who = self.call.promised_by or "customer"
-        return f"{who} offered {say_date(self.offered)}, beyond limit"
+        return f"{who} offered {say_offer(self.offered, for_note=True)}, beyond limit"
 
-    def hear_time(self, text, lang):
-        """One answer for the colleague's call: book it and close, whatever it says."""
-        call, now = self.call, self.call.clock()
-        said = self.ask.read(text)
-        attempts = []
-        if "when" in said:
-            attempts.append((said["when"], said.get("note") if said.get("day_only") else None))
-            if not said.get("day_only"):  # outside the hours: that day at the default hour
-                attempts.append((at_default_hour(said["when"].date(), now.tzinfo), DAY_ONLY_NOTE))
-        attempts.append((next_default_slot(now), NO_TIME_NOTE))
-        for when, day_only in attempts:
-            if when is None:
-                continue
-            result = call.far_date_handoff(when, self.offered_note(), day_only)
-            if result.get("saved"):
-                self.state = "done"
-                return self._close(lang, when, day_only)
-        logger.warning("RULE promise_date_far_colleague: no callback could be booked")
+    def close(self, text, lang):
+        """The fixed close: book the colleague's call at the next default-hour slot, no
+        question about the day or time, and end the call."""
         self.state = "done"
-        call.handoff_requested = True
-        call.record_outcome("human_callback", self.offered_note())
-        return Reply(self._line(caller_words.HANDOFF_CLOSE_NO_TIME, lang), hang_up=True)
-
-    def _close(self, lang, when, day_only):
-        tp = self._tp()
-        if day_only:
-            lines = caller_words.FAR_DATE_CLOSE_DAY_TP if tp else caller_words.FAR_DATE_CLOSE_DAY
-            return Reply(self._line(lines, lang, day=say_day(when)), hang_up=True)
-        lines = caller_words.FAR_DATE_CLOSE_TP if tp else caller_words.FAR_DATE_CLOSE
-        return Reply(self._line(lines, lang, when=say_when(when, lang)), hang_up=True)
+        note = self.offered_note()
+        book_followup(self.call, note, "human_callback")
+        logger.info("RULE promise_date_far_close: %r, %s, ending the call", text[:60], note)
+        lines = caller_words.FAR_DATE_CLOSE_TP if self._tp() else caller_words.FAR_DATE_CLOSE
+        return Reply(self._line(lines, lang, date=say_offer(self.offered, lang)), hang_up=True)

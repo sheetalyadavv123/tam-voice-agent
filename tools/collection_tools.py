@@ -30,8 +30,6 @@ HANDOFF_AFTER_PROMISE = {"legal_question", "hardship", "dispute", "customer_aske
 STOP_PUSH = {"hardship", "dispute"}
 DAY_ONLY_NOTE = "caller gave day only"  # the callback's hour is DEFAULT_CALLBACK_HOUR
 ANY_TIME_NOTE = "caller said any time"  # the same, after "any time" / "koi bhi time"
-NO_TIME_NOTE = "no time given, default hour"  # the next day at DEFAULT_CALLBACK_HOUR
-
 PersonStatus = Literal["customer", "third_party", "unavailable"]
 Channel = Literal["sms", "whatsapp"]
 AiCallbackReason = Literal["customer_unavailable", "customer_requested"]
@@ -383,6 +381,17 @@ class Call:
                 "duplicate": saved["duplicate"],
                 "next": "confirm_amount_and_date_then_offer_payment_link_once"}
 
+    def withdraw_promise(self, why):
+        """Code only: this call's promise no longer stands (a hardship caller then gave a
+        date beyond the limit). It is cancelled, so no follow-up expects that date."""
+        for p in self.store.promises_for(self.customer_id, "open"):
+            if p["session_id"] == self.session_id:
+                self.store.set_promise_status(p["id"], "cancelled")
+        logger.info("RULE promise_withdrawn: %s (was %s)", why,
+                    self.promise["date"] if self.promise else None)
+        self.promise_recorded, self.promise, self.read_back_date = False, None, None
+        self.links_before_promise = None
+
     # ---- tool: schedule a callback ----
     def schedule_callback(self, day, month, year, hour, minute, reason):
         return self._schedule(day, month, year, hour, minute, reason)
@@ -395,34 +404,36 @@ class Call:
         return self._schedule(day, month, year, policy.DEFAULT_CALLBACK_HOUR, 0, reason,
                               day_only=note)
 
-    def far_date_handoff(self, when, offered_note, day_only=None):
-        """Code only, never the AI: the caller's pay date is beyond MAX_PROMISE_DAYS even
-        after one try for an earlier one. A colleague calls at `when` to confirm it; the
-        callback and the call carry offered_note ("customer offered 12 November, beyond
-        limit") so the colleague knows the date. day_only: the note when `when` is at the
-        default hour (the caller gave a day only, or no time at all)."""
+    def far_date_handoff(self, when, offered_note, outcome="human_callback"):
+        """Code only, never the AI: the caller's pay date is beyond MAX_PROMISE_DAYS (after
+        one try for an earlier one, or at once after hardship). Someone from the team calls
+        at `when` (the next DEFAULT_CALLBACK_HOUR slot; the caller is not asked) to talk
+        about it. The callback and the call carry offered_note ("customer offered 12
+        November, beyond limit"). outcome: human_callback, or hardship."""
         if self.promise_recorded:
             return {"saved": False, "reason": "promise_already_recorded"}
         result = self._schedule(when.day, when.month, when.year, when.hour, when.minute,
-                                "human_followup", day_only=day_only, note=offered_note)
+                                "human_followup", note=offered_note, code_time=True)
         if not result.get("saved"):
             return result
         self.handoff_requested = True
         self.handoff_callback_id = self.callback_id
-        note = "; ".join(x for x in (offered_note, day_only) if x)
-        self.record_outcome("human_callback", note)
-        logger.info("RULE promise_date_far_handoff: %s, colleague call at %s", note, when.isoformat())
+        self.record_outcome(outcome, offered_note)
+        logger.info("RULE promise_date_far_handoff: %s, colleague call at %s",
+                    offered_note, when.isoformat())
         return result
 
-    def _schedule(self, day, month, year, hour, minute, reason, day_only=None, note=None):
+    def _schedule(self, day, month, year, hour, minute, reason, day_only=None, note=None,
+                  code_time=False):
         """day_only: the note for a booking at the default hour, else None. note: more for
-        the callback's note, from the code only."""
+        the callback's note, from the code only. code_time: the code chose the time (never
+        the AI), so the caller need not have said one."""
         if self.person_status is None:
             return {"error": "confirm_person_first"}
         if reason not in CALLBACK_REASONS:
             return {"saved": False, "error": "invalid_reason", "allowed": sorted(CALLBACK_REASONS)}
         # The time must come from the caller, never from the AI.
-        if not day_only and not caller_words.named_a_time(self.caller_lines):
+        if not day_only and not code_time and not caller_words.named_a_time(self.caller_lines):
             return {"saved": False, "reason": "caller_did_not_give_a_time",
                     "next": "ask_the_caller_for_a_day_and_time"}
         d = rules.make_date(day, month, year)

@@ -387,9 +387,18 @@ HARDSHIP = re.compile(
     r"|no\s+money|can'?t\s+afford|cannot\s+afford|medical|hospital\w*|illness|sick|surgery"
     r"|accident|treatment|salary\s+(?:has\s*n'?t|did\s*n'?t|not|nahi|nahin|abhi\s+tak\s+nahi)"
     r"|no\s+salary|salary\s+(?:delay\w*|ruki|atki|band)"
-    r"|paisa\s+nahi\w*|paise\s+nahi\w*|paiso\w*\s+ki\s+(?:dikkat|tangi|problem|kami|pareshani)"
+    r"|paisa\s+nahi\w*|paise\s+nahi\w*|pais(?:e|o|a)\w*\s+ki\s+(?:dikkat|tangi|problem|kami|pareshani)"
     r"|haath\s+tang|tangi|financial|(?:job|naukri|nokri|kaam)\s+(?:chali|chhoot|chhut|chut|gayi|gai|nahi|band)"
-    r"|bimar|beemar|bimari|beemari|ilaaj|ilaj|operation|business\s+(?:band|loss|thanda|nahi))\b"
+    r"|bimar|beemar|bimari|beemari|ilaaj|ilaj|operation|business\s+(?:band|loss|thanda|nahi)"
+    # said indirectly: "ghar mein problem chal rahi hai", "abhi haalat theek nahi hai",
+    # "things are tough right now"
+    r"|ghar\s+(?:mein|me|main|pe|par)\s+(?:kuch\s+)?(?:problem|dikkat|pareshani|issue|tension)"
+    r"|(?:haalat|halat|haalaat|halaat)\s+(?:theek|thik|achhi|acchi|sahi)\s+(?:nahi|nahin|nhi)"
+    r"|things\s+are\s+(?:really\s+|very\s+|a\s+bit\s+)?(?:tough|hard|difficult|bad|tight)"
+    r"|going\s+through\s+a\s+(?:tough|hard|difficult|bad)\s+(?:time|phase|patch)"
+    r"|(?:tough|difficult)\s+times?)\b"
+    r"|घर\s+(?:में|पे|पर)\s+(?:कुछ\s+)?(?:problem|प्रॉब्लम|दिक्कत|परेशानी|टेंशन)"
+    r"|(?:हालत|हालात)\s+(?:ठीक|अच्छी|सही)\s+नहीं"
     r"|पैसे\s+नहीं|पैसा\s+नहीं|पैसों\s+की\s+(?:दिक्कत|तंगी|परेशानी|कमी)|तंगी|हाथ\s+तंग"
     r"|(?:नौकरी|जॉब|काम)\s+(?:चली|छूट|छुट|नहीं|बंद)|बीमार|अस्पताल|हॉस्पिटल|इलाज|ऑपरेशन"
     r"|(?:सैलरी|salary|तनख्वाह|तनख़्वाह)\s+(?:नहीं|अभी\s+तक\s+नहीं|रुकी|अटकी)|आर्थिक",
@@ -598,11 +607,33 @@ HARDSHIP_DATE_ASK = {
     "hi": "मैं समझ सकती हूँ, {name} जी। क्या आप बता पाएंगे कि आप किस तारीख तक pay कर पाएंगे?",
     "en": "I understand, {name}. Could you tell me a date by which you'll be able to pay?",
 }
-HARDSHIP_CALLBACK = {
-    "hi": "कोई बात नहीं। हमारी सहयोगी आपसे बात करेंगी। उन्हें आपको किस दिन और किस समय कॉल करना "
-          "ठीक रहेगा?",
-    "en": "That's all right. A colleague will talk to you about it. What day and time would "
-          "suit you for their call?",
+HARDSHIP_DATE_ASK_TP = {  # a verified relative reported the hardship
+    "hi": "मैं समझ सकती हूँ। क्या आप बता पाएंगे कि {name} जी किस तारीख तक pay कर पाएंगे?",
+    "en": "I understand. Could you tell me a date by which {name} will be able to pay?",
+}
+# Hardship and still no date after one question: no time question, the call ends
+HARDSHIP_NO_DATE_CLOSE = {
+    "hi": "मैं समझ सकती हूँ। इसके बारे में हमारी टीम से कोई आपसे बात करेगा। अपना ध्यान रखिए, धन्यवाद।",
+    "en": "I understand. Someone from our team will talk to you about it. Take care, thank you.",
+}
+HARDSHIP_NO_DATE_CLOSE_TP = {
+    "hi": "मैं समझ सकती हूँ। इसके बारे में हमारी टीम से कोई {name} जी से बात करेगा। अपना ध्यान रखिए, "
+          "धन्यवाद।",
+    "en": "I understand. Someone from our team will talk to {name} about it. Take care, thank you.",
+}
+# Hardship and a pay date beyond MAX_PROMISE_DAYS: no push for an earlier date, the call
+# ends. {date} like "12 November", "13 से 18 November", "December".
+HARDSHIP_FAR_CLOSE = {
+    "hi": "मैं समझ सकती हूँ, {name} जी। आपने जो {date} बताया है, उसके बारे में हमारी टीम से कोई "
+          "आपसे बात करेगा। अपना ध्यान रखिए, धन्यवाद।",
+    "en": "I understand, {name}. Someone from our team will talk to you about {date}, as you "
+          "mentioned. Take care, thank you.",
+}
+HARDSHIP_FAR_CLOSE_TP = {
+    "hi": "मैं समझ सकती हूँ। आपने जो {date} बताया है, उसके बारे में हमारी टीम से कोई {name} जी से "
+          "बात करेगा। अपना ध्यान रखिए, धन्यवाद।",
+    "en": "I understand. Someone from our team will talk to {name} about {date}, as you "
+          "mentioned. Take care, thank you.",
 }
 # ---- a day but no time. {day} like "Monday 9 November" ----
 TIME_FOR_DAY = {
@@ -650,34 +681,18 @@ FAR_DATE_EARLIER_TP = {
     "hi": "ठीक है, {date} नोट किया। क्या वे {latest} तक pay कर पाएंगे?",
     "en": "All right, I've noted {date}. Would they be able to pay by {latest}?",
 }
-FAR_DATE_COLLEAGUE = {
-    "hi": "ठीक है, {date} के लिए हमारी एक सहयोगी आपसे बात करके confirm करेंगी। "
-          "उन्हें आपको किस दिन और किस समय कॉल करना ठीक रहेगा?",
-    "en": "All right. A colleague will talk to you to confirm {date}. "
-          "What day and time would suit you for their call?",
-}
-FAR_DATE_COLLEAGUE_TP = {
-    "hi": "ठीक है, {date} के लिए हमारी एक सहयोगी {name} जी से बात करके confirm करेंगी। "
-          "उनसे किस दिन और किस समय बात हो सकती है?",
-    "en": "All right. A colleague will talk to {name} to confirm {date}. "
-          "What day and time would be good to reach {name}?",
-}
-# {when} like "Monday 2 November, दोपहर 12 बजे"; {day} like "Tuesday 3 November"
+# Still too far: the call ends here; the callback is booked without asking for a time
 FAR_DATE_CLOSE = {
-    "hi": "ठीक है, हमारी सहयोगी आपको {when} कॉल करेंगी। धन्यवाद, आपका दिन शुभ हो।",
-    "en": "All right. Our colleague will call you on {when}. Thank you, have a good day.",
-}
-FAR_DATE_CLOSE_DAY = {
-    "hi": "ठीक है, हमारी सहयोगी आपको {day} को कॉल करेंगी। धन्यवाद, आपका दिन शुभ हो।",
-    "en": "All right. Our colleague will call you on {day}. Thank you, have a good day.",
+    "hi": "ठीक है, {date} थोड़ा आगे की तारीख है। इसके बारे में हमारी टीम से कोई आपसे बात करेगा। "
+          "धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right, {date} is a bit further out than I can note. Someone from our team will "
+          "talk to you about it. Thank you, have a good day.",
 }
 FAR_DATE_CLOSE_TP = {
-    "hi": "धन्यवाद। हमारी सहयोगी {name} जी को {when} कॉल करेंगी। आपका दिन शुभ हो।",
-    "en": "Thank you. Our colleague will call {name} on {when}. Have a good day.",
-}
-FAR_DATE_CLOSE_DAY_TP = {
-    "hi": "धन्यवाद। हमारी सहयोगी {name} जी को {day} को कॉल करेंगी। आपका दिन शुभ हो।",
-    "en": "Thank you. Our colleague will call {name} on {day}. Have a good day.",
+    "hi": "ठीक है, {date} थोड़ा आगे की तारीख है। इसके बारे में हमारी टीम से कोई {name} जी से बात "
+          "करेगा। धन्यवाद, आपका दिन शुभ हो।",
+    "en": "All right, {date} is a bit further out than I can note. Someone from our team will "
+          "talk to {name} about it. Thank you, have a good day.",
 }
 
 SILENCE_CHECK = {

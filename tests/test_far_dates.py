@@ -103,7 +103,7 @@ def test_the_resolved_date_is_added_to_the_turn(caplog):
         agent._add_days_note(ctx, "agle hafte kar dungi")
     notes = [m.text_content for m in ctx.items if m.type == "message" and m.role == "system"]
     assert notes == ["The caller named these days (IST): agle hafte = Monday 9 November. "
-                     "Use exactly these dates."]
+                     "Use exactly these dates; for a range, the promise date is its last day."]
     assert "RULE weekday_resolved: agle hafte = Monday 9 November" in caplog.text
 
 
@@ -158,74 +158,105 @@ def test_the_ai_gets_the_promise_note():
 
 # ---- still too far: a colleague, the date in the note ----
 
-def test_still_too_far_books_the_colleague_with_the_date(caplog):
+TUESDAY_11 = datetime(2026, 11, 3, 11, 0, tzinfo=IST)  # the next default-hour slot from MON 11:00
+CLOSE_12_HI = ("ठीक है, 12 November थोड़ा आगे की तारीख है। इसके बारे में हमारी टीम से कोई आपसे बात "
+               "करेगा। धन्यवाद, आपका दिन शुभ हो।")
+NOTE_12 = "customer offered 12 November, beyond limit"
+
+
+def test_still_too_far_ends_the_call_with_the_fixed_line(caplog):
     agent, call, store, session = verified()
     hear(agent, FIRST)
     with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
         assert hear(agent, "नहीं, 12 को ही") is True
-        assert session.said[-1] == says(caller_words.FAR_DATE_COLLEAGUE, date="12 November")
-        assert session.said[-1].startswith("ठीक है, 12 November के लिए हमारी एक सहयोगी आपसे बात "
-                                           "करके confirm करेंगी।")
-        assert session.closed is False and callbacks(store) == []
-        assert hear(agent, "kal shaam 5 baje") is True
-    assert session.said[-1] == says(caller_words.FAR_DATE_CLOSE,
-                                    when="Tuesday 3 November, शाम 5 बजे")
-    assert session.closed is True
-    note = "customer offered 12 November, beyond limit"
-    assert callbacks(store) == [("human_followup", datetime(2026, 11, 3, 17, 0, tzinfo=IST), note)]
-    assert call.outcome == "human_callback" and call.note == note
+    assert session.said[-1] == CLOSE_12_HI
+    assert session.closed is True  # no question about a day or time
+    assert callbacks(store) == [("human_followup", TUESDAY_11, NOTE_12)]
+    assert call.outcome == "human_callback" and call.note == NOTE_12
     assert call.handoff_requested and promises(store) == []
-    assert "RULE promise_date_far_colleague" in caplog.text
+    assert "RULE promise_date_far_close" in caplog.text
     assert "RULE promise_date_far_handoff" in caplog.text
 
 
-def test_the_time_is_asked_once_then_the_default_hour():
-    agent, call, store, session = verified()
+def test_the_close_never_asks_for_a_day_or_time():
+    for text in caller_words.FAR_DATE_CLOSE.values():
+        assert "?" not in text and "समय" not in text and "time" not in text
+
+
+def test_the_slot_is_today_when_the_default_hour_is_still_ahead():
+    early = datetime(2026, 11, 2, 9, 30, tzinfo=IST)  # 9:30, before 11
+    agent, call, store, session = verified(early)
     hear(agent, FIRST)
     hear(agent, "nahi")
-    hear(agent, "pata nahi")  # no time, no day: tomorrow at DEFAULT_CALLBACK_HOUR
-    note = "customer offered 12 November, beyond limit; no time given, default hour"
-    assert callbacks(store) == [("human_followup", datetime(2026, 11, 3, 11, 0, tzinfo=IST), note)]
-    assert session.said[-1] == says(caller_words.FAR_DATE_CLOSE_DAY, day="Tuesday 3 November")
-    assert call.outcome == "human_callback" and call.note == note and session.closed
+    assert callbacks(store) == [("human_followup", datetime(2026, 11, 2, 11, 0, tzinfo=IST), NOTE_12)]
 
 
-def test_a_day_without_a_time_books_the_default_hour():
-    agent, call, store, session = verified()
-    hear(agent, FIRST)
-    hear(agent, "nahi ho payega")
-    hear(agent, "Wednesday")
-    note = "customer offered 12 November, beyond limit; caller gave day only"
-    assert callbacks(store) == [("human_followup", datetime(2026, 11, 4, 11, 0, tzinfo=IST), note)]
-    assert session.said[-1] == says(caller_words.FAR_DATE_CLOSE_DAY, day="Wednesday 4 November")
-
-
-def test_a_time_outside_the_hours_books_that_day_at_the_default_hour():
-    agent, call, store, session = verified()
+def test_after_the_calling_hours_the_slot_is_tomorrow():
+    late = datetime(2026, 11, 2, 18, 30, tzinfo=IST)
+    agent, call, store, session = verified(late)
     hear(agent, FIRST)
     hear(agent, "nahi")
-    hear(agent, "kal raat 10 baje")
-    assert callbacks(store)[0][1] == datetime(2026, 11, 3, 11, 0, tzinfo=IST)
-    assert session.closed
+    assert callbacks(store)[0][1] == TUESDAY_11
 
 
-def test_a_later_far_date_replaces_the_offered_one():
+def test_a_later_far_date_is_the_one_in_the_note():
     agent, call, store, session = verified()
     hear(agent, FIRST)
-    hear(agent, "nahi, 15 tareekh ko")
-    assert session.said[-1] == says(caller_words.FAR_DATE_COLLEAGUE, date="15 November")
-    hear(agent, "kal 4 baje")
-    assert callbacks(store)[0][2] == "customer offered 15 November, beyond limit"
+    hear(agent, "नहीं, 13 को")
+    assert session.said[-1] == says(caller_words.FAR_DATE_CLOSE, date="13 November")
+    assert callbacks(store) == [("human_followup", TUESDAY_11,
+                                 "customer offered 13 November, beyond limit")]
 
 
-@pytest.mark.parametrize("answer", ["9 तक नहीं हो पाएगा", "nahi", "that's not possible",
-                                    "dekhti hoon", "मुश्किल है"])
-def test_anything_but_an_earlier_date_goes_to_the_colleague(answer):
+@pytest.mark.parametrize("answer", ["9 तक नहीं हो पाएगा", "nahi", "no", "that's not possible",
+                                    "मुश्किल है", "नहीं", "12 को ही"])
+def test_a_no_or_a_far_date_closes_at_once(answer):
+    agent, call, store, session = verified()
+    hear(agent, FIRST)
+    assert hear(agent, answer) is True
+    assert session.said[-1].startswith("ठीक है, 12 November थोड़ा आगे की तारीख है।")
+    assert session.closed and promises(store) == []
+    assert session.said.count(EARLIER_HI) == 1
+
+
+# ---- an unclear answer is not a no ----
+
+@pytest.mark.parametrize("answer", ["నైన్", "ఆండీ", "", "dekhti hoon", "hmm"])
+def test_an_unclear_answer_gets_the_same_question_once_more(answer, caplog):
+    agent, call, store, session = verified()
+    hear(agent, FIRST)
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, answer) is True
+    assert session.said[-2:] == [EARLIER_HI, EARLIER_HI]
+    assert session.closed is False and callbacks(store) == [] and call.outcome is None
+    assert "RULE promise_date_far_unclear" in caplog.text
+
+
+@pytest.mark.parametrize("answer", ["నైన్", "ఆండీ", ""])
+def test_two_unclear_answers_close(answer):
     agent, call, store, session = verified()
     hear(agent, FIRST)
     hear(agent, answer)
-    assert session.said[-1] == says(caller_words.FAR_DATE_COLLEAGUE, date="12 November")
-    assert promises(store) == []
+    hear(agent, answer)
+    assert session.said.count(EARLIER_HI) == 2
+    assert session.said[-1] == CLOSE_12_HI and session.closed
+    assert callbacks(store) == [("human_followup", TUESDAY_11, NOTE_12)]
+
+
+def test_unclear_then_an_earlier_date_records_the_promise():
+    agent, call, store, session = verified()
+    hear(agent, FIRST)
+    hear(agent, "ఆండీ")
+    assert hear(agent, "9 तक") is False
+    assert promises(store) == [(date(2026, 11, 9), "open")] and callbacks(store) == []
+
+
+def test_unclear_then_no_closes():
+    agent, call, store, session = verified()
+    hear(agent, FIRST)
+    hear(agent, "నైన్")
+    hear(agent, "nahi")
+    assert session.said[-1] == CLOSE_12_HI
 
 
 def test_english():
@@ -235,11 +266,10 @@ def test_english():
     assert session.said[-1] == ("All right, I've noted 12 November. "
                                 "Would you be able to pay by 9 November?")
     hear(agent, "no")
-    assert session.said[-1] == ("All right. A colleague will talk to you to confirm 12 November. "
-                                "What day and time would suit you for their call?")
-    hear(agent, "tomorrow at 4 pm")
-    assert session.said[-1] == ("All right. Our colleague will call you on Tuesday 3 November "
-                                "at 4 pm. Thank you, have a good day.")
+    assert session.said[-1] == ("All right, 12 November is a bit further out than I can note. "
+                                "Someone from our team will talk to you about it. Thank you, "
+                                "have a good day.")
+    assert session.closed and callbacks(store)[0][0] == "human_followup"
 
 
 # ---- the limit is a setting ----
@@ -267,7 +297,7 @@ def test_the_ais_too_far_promise_goes_to_the_code(caplog):
 def test_the_earlier_question_is_asked_once():
     agent, call, store, session = verified()
     hear(agent, FIRST)
-    hear(agent, "nahi")  # colleague
+    hear(agent, "nahi")  # the close
     assert session.said.count(EARLIER_HI) == 1
 
 
@@ -279,10 +309,131 @@ def test_call_me_in_ten_days_is_not_a_pay_date():
     assert agent.far.state is None
 
 
-def test_hardship_with_a_far_date_also_gets_the_earlier_question():
+# ---- ranges ----
+
+@pytest.mark.parametrize("text,first,last", [
+    ("10-15 din", date(2026, 11, 12), date(2026, 11, 17)),
+    ("10-15 din mein", date(2026, 11, 12), date(2026, 11, 17)),
+    ("10 se 15 din mein", date(2026, 11, 12), date(2026, 11, 17)),
+    ("10 to 15 days", date(2026, 11, 12), date(2026, 11, 17)),
+    ("in 10 to 15 days", date(2026, 11, 12), date(2026, 11, 17)),
+    ("दस से पंद्रह दिन में", date(2026, 11, 12), date(2026, 11, 17)),
+    ("2-3 hafte", date(2026, 11, 16), date(2026, 11, 23)),
+    ("next month", date(2026, 12, 1), date(2026, 12, 31)),
+    ("agle mahine tak", date(2026, 12, 1), date(2026, 12, 31)),
+    ("अगले महीने", date(2026, 12, 1), date(2026, 12, 31)),
+])
+def test_ranges_keep_both_days(text, first, last):
+    o = relative_dates.last_offer(text, MON.date())
+    assert (o.first, o.last) == (first, last)
+    assert relative_dates.last_pay_date(text, MON.date()) == last  # the limit uses the later day
+
+
+def test_a_range_note_has_both_days():
+    assert relative_dates.note_for("10-15 din mein", MON.date()) == (
+        "10-15 din mein = Thursday 12 November to Tuesday 17 November")
+
+
+def test_say_a_range():
+    o = relative_dates.last_offer("10-15 din", MON.date())
+    assert relative_dates.say_offer(o, "hi") == "12 से 17 November"
+    assert relative_dates.say_offer(o) == "12 to 17 November"
+    nxt = relative_dates.last_offer("next month", MON.date())
+    assert relative_dates.say_offer(nxt, "hi") == "अगले महीने"  # as the caller said it
+    assert relative_dates.say_offer(nxt) == "next month"
+    assert relative_dates.say_offer(nxt, for_note=True) == "next month (December)"
+    agle = relative_dates.last_offer("agle mahine tak", MON.date())
+    assert relative_dates.say_offer(agle, "hi") == "अगले महीने"
+
+
+@pytest.mark.parametrize("text,days", [("15 din lagenge", 15), ("10 din lagega", 10),
+                                       ("दस दिन लगेंगे", 10), ("2 hafte lagenge", 14)])
+def test_it_will_take_n_days(text, days):
+    from datetime import timedelta
+    assert relative_dates.last_pay_date(text, MON.date()) == MON.date() + timedelta(days=days)
+
+
+def test_a_range_ending_within_the_limit_is_not_too_far():
     agent, call, store, session = verified()
-    assert hear(agent, "meri job chali gayi, 10 din baad de dungi") is True
-    assert session.said[-1] == EARLIER_HI and call.hardship == "with_date"
+    assert hear(agent, "3-5 din mein kar dungi") is False  # 5 to 7 November: the AI records it
+    assert agent.far.state is None
+
+
+def test_a_range_ending_beyond_the_limit_gets_the_earlier_question():
+    agent, call, store, session = verified()
+    hear(agent, "5 se 10 din mein")  # ends 12 November
+    assert session.said[-1] == says(caller_words.FAR_DATE_EARLIER, date="7 से 12 November",
+                                    latest="9 November")
+    hear(agent, "nahi")
+    assert callbacks(store)[0][2] == "customer offered 7 to 12 November, beyond limit"
+
+
+# ---- hardship and a date ----
+
+HARDSHIP_FAR_HI = ("मैं समझ सकती हूँ, Sunita जी। आपने जो {date} बताया है, उसके बारे में हमारी टीम से "
+                   "कोई आपसे बात करेगा। अपना ध्यान रखिए, धन्यवाद।")
+
+
+@pytest.mark.parametrize("text,said,note", [
+    ("job chali gayi, 10-15 din mein kar dungi", "12 से 17 November", "12 to 17 November"),
+    ("salary nahi aayi, next month", "अगले महीने", "next month (December)"),
+    ("meri job chali gayi, 10 din baad de dungi", "12 November", "12 November"),
+])
+def test_hardship_beyond_the_limit_ends_kindly_with_no_earlier_question(text, said, note, caplog):
+    agent, call, store, session = verified()
+    with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
+        assert hear(agent, text) is True
+    assert session.said[-1] == HARDSHIP_FAR_HI.format(date=said)
+    assert EARLIER_HI not in session.said and "pay कर पाएंगे" not in session.said[-1]
+    assert session.closed is True  # no time question
+    full = f"hardship, offered {note}, beyond limit"
+    assert callbacks(store) == [("human_followup", TUESDAY_11, full)]
+    assert call.outcome == "hardship" and call.note == full
+    assert call.hardship == "far_date" and promises(store) == []
+    assert "RULE hardship_far_date" in caplog.text
+
+
+def test_hardship_within_the_limit_is_unchanged():
+    agent, call, store, session = verified()
+    assert hear(agent, "paise nahi hain, 5 din mein kar dungi") is False  # the AI saves the promise
+    assert call.hardship == "with_date" and callbacks(store) == [] and agent.far.state is None
+    assert agent._guard().no_callback_talk is True  # no colleague: the founder's rule
+
+
+def test_the_no_colleague_rule_is_only_for_a_date_within_the_limit():
+    agent, call, store, session = verified()
+    hear(agent, "job chali gayi, 10-15 din mein kar dungi")
+    assert agent._guard().no_callback_talk is False
+
+
+def test_hardship_then_a_far_date_after_the_date_question():
+    agent, call, store, session = verified()
+    hear(agent, "salary nahi aayi abhi")  # the code asks once for a date
+    assert session.said[-1] == says(caller_words.HARDSHIP_DATE_ASK)
+    hear(agent, "15 din mein")
+    assert session.said[-1] == HARDSHIP_FAR_HI.format(date="17 November") and session.closed
+    assert call.outcome == "hardship"
+
+
+def test_hardship_at_the_greeting_with_a_far_date():
+    agent, call, store, session = make_agent()
+    assert hear(agent, "haan ji, job chali gayi, next month kar dungi") is True
+    assert session.said[-1] == HARDSHIP_FAR_HI.format(date="अगले महीने") and session.closed
+
+
+def test_hardship_far_in_english():
+    agent, call, store, session = make_agent(customer="C003")
+    hear(agent, "yes")
+    hear(agent, "I lost my job, I can pay in 10 to 15 days")
+    assert session.said[-1] == ("I understand, Amit. Someone from our team will talk to you "
+                                "about 12 to 17 November, as you mentioned. Take care, thank you.")
+
+
+def test_the_ais_too_far_promise_after_hardship_gets_the_kind_close():
+    agent, call, store, session = verified()
+    hear(agent, "paise nahi hain, 5 din mein kar dungi")  # within: with_date, the AI's turn
+    assert run_tool(agent, agent.record_promise_to_pay(None, 20, 11, 2026)) == "stopped"
+    assert session.said[-1] == HARDSHIP_FAR_HI.format(date="20 November") and session.closed
 
 
 def test_before_identity_nothing_happens():
@@ -310,11 +461,9 @@ def test_a_verified_relative_with_a_far_date():
     assert session.said[-1] == says(caller_words.FAR_DATE_EARLIER_TP, date="12 November",
                                     latest="9 November")
     hear(agent, "nahi")
-    assert session.said[-1] == says(caller_words.FAR_DATE_COLLEAGUE_TP, date="12 November")
-    hear(agent, "kal 4 baje")
-    assert session.said[-1] == says(caller_words.FAR_DATE_CLOSE_TP,
-                                    when="Tuesday 3 November, शाम 4 बजे")
-    assert callbacks(store)[0][0] == "human_followup"
+    assert session.said[-1] == says(caller_words.FAR_DATE_CLOSE_TP, date="12 November")
+    assert "Sunita जी से बात करेगा" in session.said[-1] and session.closed
+    assert callbacks(store)[0][:2] == ("human_followup", TUESDAY_11)
     assert callbacks(store)[0][2].endswith("offered 12 November, beyond limit")
     assert call.outcome == "human_callback"
 

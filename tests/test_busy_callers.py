@@ -202,14 +202,14 @@ def test_third_party_after_please_tell_the_time_a_day_books_at_once():
     assert _callbacks(store) == [("customer_unavailable", THURSDAY_11, "caller gave day only")]
 
 
-def test_hardship_any_time_with_a_day():
+def test_hardship_without_a_date_never_asks_for_a_time():
     agent, call, store, session = make_agent()
     hear(agent, "haan ji")
     hear(agent, "meri job chali gayi")
     hear(agent, "abhi pata nahi")
-    hear(agent, "Monday, koi bhi time")
-    assert session.said[-1] == says(caller_words.HANDOFF_CLOSE_DAY, day="Monday 2 November")
-    assert _callbacks(store) == [("human_followup", MONDAY_11, "caller said any time")]
+    assert session.said[-1] == caller_words.HARDSHIP_NO_DATE_CLOSE["hi"] and session.closed
+    assert not any(caller_words.TIME_FOR_DAY["hi"][:5] in s or "किस समय" in s for s in session.said)
+    assert _callbacks(store) == [("human_followup", THURSDAY_11, "hardship, no pay date")]
 
 
 # ---- no colleague for a busy customer ----

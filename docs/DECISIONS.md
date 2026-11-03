@@ -106,13 +106,8 @@ A Console caller said "मैं इसको दस दिन बाद pay क
 - **Too far: one try for earlier, in code.** "ठीक है, {date} नोट किया। क्या आप {latest} तक
   pay कर पाएंगे?" A date within the limit, or a plain yes (= the last allowed day), is
   recorded as a promise as usual and the AI carries on (amount, date, link).
-- **Still too far** (the same or another far date, a no, "nahi ho payega", anything
-  else): "ठीक है, {date} के लिए हमारी एक सहयोगी आपसे बात करके confirm करेंगी।", followed by
-  the one question for the time. Whatever the answer, the colleague's callback
-  (human_followup) is booked and the call closes. The caller's time, or their day at
-  DEFAULT_CALLBACK_HOUR, or, with nothing usable, the next DEFAULT_CALLBACK_HOUR. Outcome
-  human_callback, note "customer offered {date}, beyond limit" on the call and the
-  callback.
+- **Still too far:** replaced on 2026-11-03, see the next entry. (At first the code said
+  a colleague would confirm the date and asked for a day and time for their call.)
 - If the AI's own record_promise_to_pay gets "too far", the code takes over with the same
   question. The AI never says "a colleague will call" about a date.
 - "10 din baad call karna" is a call-later request, not a pay date.
@@ -120,3 +115,98 @@ A Console caller said "मैं इसको दस दिन बाद pay क
 **Where.** `tools/relative_dates.py`, `tools/far_date.py`, `tools/collection_tools.py`
 (`far_date_handoff`), `tools/callback_ask.py` (`next_default_slot`), `agent/main.py`
 (`_add_days_note`, `_far_date_start`, `_far_reply`).
+
+## 2026-11-03: A date still too far ends the call (from a Console test)
+
+**Decision.** The one try for an earlier date stays: "ठीक है, {date} नोट किया। क्या आप
+{latest} तक pay कर पाएंगे?". Then:
+
+- **A date within the limit, or a plain yes** (= the last allowed day): the promise is
+  saved as usual.
+- **Still too far** (the same or another far date, a no, "nahi ho payega"): the code
+  speaks one fixed line and the call ends. There is no question about a day or time:
+  - Hindi: "ठीक है, {date} थोड़ा आगे की तारीख है। इसके बारे में हमारी टीम से कोई आपसे बात
+    करेगा। धन्यवाद, आपका दिन शुभ हो।"
+  - English: "All right, {date} is a bit further out than I can note. Someone from our
+    team will talk to you about it. Thank you, have a good day."
+  - A verified relative hears "... {name} जी से बात करेगा".
+
+  A human_followup callback is booked at the next DEFAULT_CALLBACK_HOUR slot inside the
+  calling hours: today's if it is still ahead, else tomorrow's. The note on the call and
+  the callback is "customer offered {date}, beyond limit" (the last far date said), and
+  the outcome is human_callback.
+- **An unclear answer is not a no.** An answer that can't be read (empty, garbled,
+  another script such as "నైన్" or "ఆండీ", or no yes, no no and no date) gets the same
+  question once more. A second unclear answer gets the close.
+
+**Where.** `tools/far_date.py` (`answer`, `close`), `tools/caller_words.py`
+(`FAR_DATE_CLOSE`), `tools/collection_tools.py` (`far_date_handoff`).
+
+## 2026-11-03: Hardship and a pay date; ranges
+
+**Rule.** Hardship with a date within the limit: no colleague (founder). Beyond the
+limit: human follow-up, no push for an earlier date (pending founder confirmation).
+
+- **Ranges.** "10-15 din", "10 se 15 din mein", "10 to 15 days", "2-3 hafte" resolve to a
+  first and a last day; "agle mahine", "next month" is the whole of next month. The
+  limit check uses the later day. The turn's note and the call's note keep both
+  ("10-15 din mein = Friday 13 November to Wednesday 18 November"; "offered 13 to 18
+  November"). A promise from a range is for its last day.
+- **Hardship + a date within the limit:** unchanged. The promise is saved and no
+  colleague is mentioned. The speech guard drops colleague / call-back talk only in this
+  case (`call.hardship == "with_date"`).
+- **Hardship + a date beyond the limit:** there is no earlier-date question. The code says
+  a fixed line and ends the call, with no time question:
+  - Hindi: "मैं समझ सकती हूँ, {name} जी। आपने जो {date} बताया है, उसके बारे में हमारी टीम से
+    कोई आपसे बात करेगा। अपना ध्यान रखिए, धन्यवाद।"
+  - English: "I understand, {name}. Someone from our team will talk to you about {date},
+    as you mentioned. Take care, thank you."
+
+  A human_followup callback is booked at the next DEFAULT_CALLBACK_HOUR slot. The outcome
+  is hardship, with the note "hardship, offered {range or date}, beyond limit". This
+  applies wherever the date comes: in the hardship message itself, after the code's "by
+  which date?", later in the call, or from the AI's too-far record_promise_to_pay.
+
+**Where.** `tools/relative_dates.py` (`RANGE`, `NEXT_MONTH`, `Offer`, `say_offer`),
+`tools/far_date.py` (`hardship_close`, `book_followup`), `tools/caller_words.py`
+(`HARDSHIP_FAR_CLOSE`), `agent/main.py` (`_paths`, `_hardship_far`).
+
+## 2026-11-03: One order for the rules; hardship without a date
+
+**Rule.** Once the call is unlocked, the order in which the rules take a message is
+decided in one place, `tools/precedence.py` (`route`), and `agent/main.py` (`_paths`)
+runs the result:
+
+    legal -> wrong number -> hardship beyond the limit -> plain beyond the limit
+          -> hardship within the limit -> normal promise -> hardship with no date
+
+- **Everywhere.** The order applies to every message, including while the code is asking
+  for an earlier date. A legal question or "wrong number" there gets its own close, not
+  the earlier-date question again. The AI's too-far `record_promise_to_pay` also goes
+  through the same order.
+- **Hardship inside the too-far flow.** Hardship said at any point while the code asks
+  for an earlier date switches to the hardship-beyond-limit close, using the date
+  already offered or a new far one. The one exception follows the order: an earlier date
+  within the limit, given with the hardship, saves the promise (hardship within the
+  limit).
+- **A later far date after a hardship promise within the limit.** The promise is
+  cancelled, the no-colleague rule ends (`call.hardship` becomes `far_date`), and the
+  hardship-beyond-limit close is spoken. Without hardship, changing a saved promise stays
+  with the AI.
+- **Hardship without any date.** The code asks once for a date. If none comes, there is
+  no day or time question: the code says "मैं समझ सकती हूँ। इसके बारे में हमारी टीम से कोई
+  आपसे बात करेगा। अपना ध्यान रखिए, धन्यवाद।" and the call ends. It books a human_followup
+  callback at the next DEFAULT_CALLBACK_HOUR slot, with outcome hardship and note
+  "hardship, no pay date". This replaces the earlier "a colleague will call: what day and
+  time?".
+- **A verified relative** reporting hardship gets the same paths in the third person
+  ("Sunita जी किस तारीख तक pay कर पाएंगे?", "हमारी टीम से कोई Sunita जी से बात करेगा").
+- **Hardship said indirectly** also counts: "ghar mein problem chal rahi hai", "abhi
+  haalat theek nahi hai", "things are tough right now", "going through a tough time",
+  "paise ki dikkat".
+- **After a dispute** (the payment push is over), only legal and wrong number apply.
+
+**Where.** `tools/precedence.py`, `agent/main.py` (`_paths`, `_hardship_far`,
+`_hardship_no_date`), `tools/far_date.py` (`hardship_no_date_close`),
+`tools/collection_tools.py` (`withdraw_promise`), `tools/caller_words.py` (`HARDSHIP`,
+`HARDSHIP_DATE_ASK_TP`, `HARDSHIP_NO_DATE_CLOSE`).
