@@ -24,17 +24,20 @@ from livekit.plugins import (
 
 import config
 import db
-from tools import caller_words, dates, relative_dates, rules, schema_check
+from tools import caller_words, dates, precedence, relative_dates, rules, schema_check
 from tools.call_later import CallLaterFlow, asks_call_later, busy_before_identity
-from tools.callback_ask import TimeAsk, book, say_day, says_any_time
+from tools.callback_ask import TimeAsk, book, say_day
 from tools.collection_tools import (
     AiCallbackReason, Call, Channel, HandoffReason, Outcome, PersonStatus,
 )
 from tools.dates import say_when
-from tools.far_date import FarDateFlow, say_date
+from tools.far_date import (
+    FarDateFlow, hardship_close, hardship_no_date_close, latest_allowed, say_date,
+)
+from tools.relative_dates import last_offer, single
 from tools.language import LanguageTracker, turn_language
 from tools.speech_guard import ReplyGuard
-from tools.third_party import DONT_KNOW, MAX_TIME_MISSES, ThirdPartyFlow, time_outside_line
+from tools.third_party import ThirdPartyFlow, time_outside_line
 from tools.store import MemoryStore
 from tools.pg_store import PostgresStore
 
@@ -178,7 +181,8 @@ class Collector(Agent):
             logger.info("RULE weekday_resolved: %s", days)
         if days and turn_ctx is not None:
             turn_ctx.add_message(role="system", content=(
-                f"The caller named these days (IST): {days}. Use exactly these dates."))
+                f"The caller named these days (IST): {days}. Use exactly these dates; for a "
+                "range, the promise date is its last day."))
             promise = self.call.promise
             new = [d for _, d in relative_dates.pay_dates(text, today)]
             if promise and promise["date"] not in new:
@@ -225,22 +229,17 @@ class Collector(Agent):
         if self.later.active:
             reply = self.later.hear(text, self.language.current)
             return reply.line, reply.hang_up
-        if self.far.active:
-            return self._far_reply(turn_ctx, text)
         if call.person_status is None:
             reply = await self._identity_reply(text)
             if reply[0] or call.person_status is None:
                 return reply
+        line, hang_up, handled = await self._paths(turn_ctx, text)  # tools/precedence order
+        if handled:  # a line, or the AI replies to this path with nothing else checked
+            return line, hang_up
         line, hang_up = self._fixed_reply(text)
         if line:
             return line, hang_up
-        line = self._hardship_reply(turn_ctx, text)
-        if line:
-            return line, False
         line = self._cant_commit_reply(text)
-        if line:
-            return line, False
-        line = self._far_date_start(text)
         if line:
             return line, False
         line, hang_up = self._call_later_reply(text)
@@ -259,30 +258,90 @@ class Collector(Agent):
         reply = self.later.start(text, self.language.current)
         return reply.line, reply.hang_up
 
-    def _far_date_start(self, text, offered=None):
-        """A pay date beyond MAX_PROMISE_DAYS ("दस दिन बाद pay कर दूंगी"): the code asks once
-        for one within the limit. offered: the date, when the AI's record_promise_to_pay
-        found it too far; else it is read from the caller's words."""
+    async def _paths(self, turn_ctx, text, offer=None):
+        """Every rule about legal questions, a wrong number, pay dates and hardship, in the
+        one order tools/precedence.route decides. offer: a date the AI's
+        record_promise_to_pay found too far; else the date is read from the caller's words.
+        Returns (line, hang_up, handled): handled is True when this path took the turn (a
+        line from the code, or the AI replies to it with no other check run)."""
+        call, lang = self.call, self.language.current
+        if not call.unlocked:
+            return None, False, False
+        if offer is None and not (asks_call_later(text) and not self.far.active):
+            offer = last_offer(text, call.clock().date())  # "10 din baad call karna" is not one
+        if offer is None and self.far.active:
+            offer = self.far.offered  # asking for an earlier date: the date already offered
+        path = precedence.route(text, call.first_name, offer=offer, latest=latest_allowed(call),
+                                hardship_before=call.hardship in ("asked_date", "with_date"),
+                                push_stopped=bool(call.push_stopped))
+        if path:
+            logger.info("RULE path: %s for %r", path, text[:60])
+        if path == precedence.LEGAL:
+            logger.warning("RULE legal_handoff: %s", text[:120])
+            self.far.state = "done" if self.far.active else self.far.state
+            call.transfer_to_human("legal_question")
+            call.record_outcome("human_callback", "legal question")
+            return caller_words.line(caller_words.LEGAL_LINE, lang), True, True
+        if path == precedence.WRONG_NUMBER:
+            self.far.state = "done" if self.far.active else self.far.state
+            reply = self.flow._wrong_number(text, lang, "mid-call")
+            return reply.line, reply.hang_up, True
+        if path == precedence.HARDSHIP_FAR:
+            return (*self._hardship_far(offer), True)
+        if self.far.active:  # an earlier date, a yes, a no, or something unclear
+            if path == precedence.HARDSHIP_WITHIN:
+                self._hardship_within(None)
+            return (*self._far_reply(turn_ctx, text), True)
+        if path == precedence.FAR:
+            if call.promise_recorded or self.far.state is not None:
+                return None, False, False  # changing a saved promise: the AI and its tool
+            return self.far.start(offer, lang).line, False, True
+        if path == precedence.HARDSHIP_WITHIN:
+            self._hardship_within(turn_ctx)
+            return None, False, True
+        if path == precedence.HARDSHIP_NO_DATE and call.hardship is None:
+            call.hardship = "asked_date"
+            logger.info("RULE hardship_date_ask: %r, asking once for a date", text[:60])
+            lines = (caller_words.HARDSHIP_DATE_ASK_TP if self._talking_to_someone_else()
+                     else caller_words.HARDSHIP_DATE_ASK)
+            return self._line(lines, name=call.first_name), False, True
+        if call.hardship == "asked_date" and path in (None, precedence.HARDSHIP_NO_DATE):
+            return (*self._hardship_no_date(), True)  # asked once, still no date
+        return None, False, False
+
+    def _hardship_within(self, turn_ctx):
+        """Hardship and a date within the limit: the promise closes the call, no colleague."""
+        if self.call.hardship != "with_date":
+            self.call.hardship = "with_date"
+            logger.info("RULE hardship_with_date: the promise closes the call, no colleague")
+        if turn_ctx is not None:
+            turn_ctx.add_message(role="system", content=(
+                "There is a money problem, but a day to pay was named. Be kind, read the date "
+                "back and call record_promise_to_pay. Don't mention a colleague or a call back."))
+
+    def _hardship_far(self, offer):
+        """Hardship and a date beyond the limit: no earlier-date question, the kind close.
+        A promise saved earlier in the call (hardship within the limit) is withdrawn, and
+        the no-colleague rule ends with it."""
         call = self.call
-        if (not call.unlocked or call.promise_recorded or call.push_stopped
-                or self.far.state is not None):
-            return None
-        if offered is None:
-            if asks_call_later(text):  # "10 din baad call karna" is not a pay date
-                return None
-            offered = self.far.far_date(text)
-        if offered is None:
-            return None
-        return self.far.start(offered, self.language.current).line
+        if call.promise_recorded:
+            call.withdraw_promise("hardship, a later date beyond the limit")
+        call.hardship = "far_date"  # not "with_date": the no-colleague rule is for dates within
+        self.far.state = "done"
+        reply = hardship_close(call, offer, self.language.current)
+        return reply.line, reply.hang_up
+
+    def _hardship_no_date(self):
+        """Hardship, asked once for a date, none given: the kind close, no time question."""
+        self.call.hardship = "no_date"
+        reply = hardship_no_date_close(self.call, self.language.current)
+        return reply.line, reply.hang_up
 
     def _far_reply(self, turn_ctx, text):
-        """The answer to "can you pay by <latest>?", then to "when may the colleague call?"."""
-        lang = self.language.current
-        if self.far.state == "time":
-            reply = self.far.hear_time(text, lang)
-            return reply.line, reply.hang_up
-        kind, value = self.far.answer(text, lang)
-        if kind == "colleague":
+        """The answer to "can you pay by <latest>?": the promise, the same question once
+        more (an answer that can't be read), or the fixed close."""
+        kind, value = self.far.answer(text, self.language.current)
+        if kind in ("ask", "close"):
             return value.line, value.hang_up
         d = value
         result = self._run("record_promise_to_pay", self.call.record_promise_to_pay,
@@ -365,9 +424,9 @@ class Collector(Agent):
         await self._add_note("who", f"# Who\nThe caller confirmed they are {name}. The code "
                                     "already gave the EMI reminder; carry on from there.")
         if caller_words.hardship(text):
-            line = self._hardship_reply(None, text)
+            line, hang_up, handled = await self._paths(None, text)
             if line:
-                return line, False
+                return line, hang_up
         return self._reminder()
 
     async def _flow_reply(self, reply):
@@ -413,60 +472,24 @@ class Collector(Agent):
         today = self.call.clock().date()
         return bool(relative_dates.pay_dates(text, today) or caller_words.PAY_DAY.search(text))
 
-    def _hardship_reply(self, turn_ctx, text):
-        """Hardship, read from the caller's words. With a day to pay, the AI records the
-        promise and the call closes normally, with no colleague. Without one, the code asks
-        once for a date; if none comes, a colleague calls back at the time they give."""
-        call = self.call
-        if not call.unlocked or call.push_stopped or call.hardship in ("with_date", "no_date"):
-            return None
-        if call.hardship is None:
-            if not caller_words.hardship(text):
-                return None
-            logger.info("RULE hardship_detected: %s", text[:80])
-            if not self._pay_date_named(text):
-                call.hardship = "asked_date"
-                logger.info("RULE hardship_date_ask: asking once for a date")
-                return self._line(caller_words.HARDSHIP_DATE_ASK, name=call.first_name)
-        elif not self._pay_date_named(text):  # asked once, no date: a colleague takes it
-            call.hardship = "no_date"
-            logger.info("RULE hardship_no_date: colleague callback, asking for a time")
-            self._run("transfer_to_human", call.transfer_to_human, "hardship")
-            call.record_outcome("hardship", "hardship, no pay date")
-            return self._line(caller_words.HARDSHIP_CALLBACK)
-        call.hardship = "with_date"
-        logger.info("RULE hardship_with_date: the promise closes the call, no colleague")
-        if turn_ctx is not None:
-            turn_ctx.add_message(role="system", content=(
-                "The customer has a money problem but named a day to pay. Be kind, read the "
-                "date back and call record_promise_to_pay. Don't mention a colleague or a call back."))
-        return None
-
     def _colleague_time_reply(self, text):
-        """After hardship or a dispute, a time the caller gives for the colleague's call is
-        read by the code, saved, and the call closes. In the code's own hardship flow every
-        answer is handled here; after a dispute, other messages go to the AI."""
+        """After a dispute, a time the caller gives for the colleague's call is read by the
+        code, saved, and the call closes; other messages go to the AI. (Hardship never gets
+        here: it always ends with the team's follow-up at the next default slot.)"""
         call = self.call
         if not call.push_stopped or call.callback_confirmed:
             return None, False
-        strict = call.hardship == "no_date"
-        if (strict and DONT_KNOW.search(text) and not self.time_ask.waiting
-                and not says_any_time(text)):
-            return self._handoff_close(None)
         said = self.time_ask.read(text)  # "kal" alone: asked once for the time, then the default hour
         if "ask_time" in said:
             logger.info("RULE callback_time_ask: day %s given without a time, asking once",
                         said["ask_time"])
             return self._line(caller_words.TIME_FOR_DAY, day=say_day(said["ask_time"])), False
-        if "when" in said:
-            result = self._run("schedule_callback", book, call, said, "customer_requested")
-            if result.get("saved"):
-                return self._handoff_close(said["when"], said.get("note"))
-        elif not strict:
+        if "when" not in said:
             return None, False
+        result = self._run("schedule_callback", book, call, said, "customer_requested")
+        if result.get("saved"):
+            return self._handoff_close(said["when"], said.get("note"))
         self.time_misses += 1
-        if strict and self.time_misses >= MAX_TIME_MISSES:
-            return self._handoff_close(None)
         self.time_ask.mark_asked()  # the time is asked for once at most
         if "when" in said:
             return time_outside_line(self.language.current), False
@@ -488,14 +511,8 @@ class Collector(Agent):
                           when=say_when(when, self.language.current)), True
 
     def _fixed_reply(self, text):
-        """Some questions get a fixed answer from the code and the AI doesn't get the turn.
-        Returns (line, hang_up); line is None to let the AI reply."""
-        lang = self.language.current
-        if self.call.unlocked and caller_words.legal_question(text):
-            logger.warning("RULE legal_handoff: %s", text[:120])
-            self.call.transfer_to_human("legal_question")
-            self.call.record_outcome("human_callback", "legal question")
-            return caller_words.line(caller_words.LEGAL_LINE, lang), True
+        """The link declined after a promise: the code closes. (Legal questions are a path in
+        tools/precedence, run by _paths.) Returns (line, hang_up); line None lets the AI reply."""
         if (self.call.promise_recorded and not self.call.link_sent_after_promise
                 and self._offered_link() and caller_words.declines(text)
                 and not self._names_a_day(text)):  # "nahi, kal" changes the date, not the link
@@ -740,9 +757,10 @@ class Collector(Agent):
         result = self._run("record_promise_to_pay", self.call.record_promise_to_pay, day, month, year)
         if result.get("reason") == "too_far":
             # the code asks once for an earlier date, never the AI's "a colleague will call"
-            line = self._far_date_start("", offered=rules.make_date(day, month, year))
+            d = rules.make_date(day, month, year)
+            line, hang_up, _ = await self._paths(None, "", offer=single(d))
             if line:
-                self._say(line)
+                self._say(line, hang_up)
                 raise StopResponse()
         if result.get("saved") and self.call.link_waiting:
             # the caller asked for the link before the promise was saved; send it now

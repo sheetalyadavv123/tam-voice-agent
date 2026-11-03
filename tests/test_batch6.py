@@ -308,28 +308,15 @@ def test_relative_day_then_time_books_that_time():
     assert call.note == "relative could not commit, callback booked"
 
 
-def test_hardship_day_only():
-    agent, call, store, session = make_agent()
-    confirmed(call)
-    hear(agent, "meri job chali gayi")
-    hear(agent, "abhi pata nahi")  # no date: a colleague will call
-    assert session.said[-1] == says(caller_words.HARDSHIP_CALLBACK)
-    hear(agent, "Monday")
-    assert session.said[-1] == TIME_FOR_MONDAY and session.closed is False
-    hear(agent, "koi bhi time")
-    assert session.said[-1] == says(caller_words.HANDOFF_CLOSE_DAY, day="Monday 2 November")
-    assert session.closed is True
-    assert _callbacks(store) == [("human_followup", MONDAY_11, "caller said any time")]
-    assert call.outcome == "hardship" and call.note.endswith("caller said any time")
-
-
-def test_hardship_pata_nahi_without_a_day_still_closes_without_a_time():
+def test_hardship_without_a_date_closes_without_a_time_question():
+    # batch 7: no day or time is asked; the team's call is at the next default slot
     agent, call, store, session = make_agent()
     confirmed(call)
     hear(agent, "meri job chali gayi")
     hear(agent, "abhi pata nahi")
-    hear(agent, "pata nahi")
-    assert session.said[-1] == says(caller_words.HANDOFF_CLOSE_NO_TIME)
+    assert session.said[-1] == caller_words.HARDSHIP_NO_DATE_CLOSE["hi"] and session.closed is True
+    assert _callbacks(store) == [("human_followup", THURSDAY_11, "hardship, no pay date")]
+    assert call.outcome == "hardship"
 
 
 def test_customer_busy_day_only(caplog):

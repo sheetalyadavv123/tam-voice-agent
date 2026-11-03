@@ -357,7 +357,8 @@ def test_weekday_date_is_added_to_the_turn(caplog):
     confirmed(call)
     with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
         added = turn_with_ctx(agent, "is Friday kar dungi")
-    assert added == ["The caller named these days (IST): Friday = Friday 30 October. Use exactly these dates."]
+    assert added == ["The caller named these days (IST): Friday = Friday 30 October. Use exactly "
+                     "these dates; for a range, the promise date is its last day."]
     assert "RULE weekday_resolved: Friday = Friday 30 October" in caplog.text
 
 
@@ -707,21 +708,21 @@ def test_hardship_with_a_date_goes_to_the_promise_and_no_colleague(monkeypatch, 
     assert reply_to(agent, monkeypatch, "ठीक है। हमारी सहयोगी आपको वापस कॉल करेंगी।") == "ठीक है। "
 
 
-def test_hardship_without_a_date_asks_once_then_books_the_colleague(caplog):
+def test_hardship_without_a_date_asks_once_then_the_team_follows_up(caplog):
     agent, call, store, session = make_agent()
     confirmed(call)
     with caplog.at_level(logging.INFO, logger="tam-voice-agent"):
         assert hear(agent, "abhi paise nahi hain, meri job chali gayi") is True
         assert session.said == [says(caller_words.HARDSHIP_DATE_ASK)]
         assert hear(agent, "abhi kuch nahi keh sakti") is True
-        assert session.said[-1] == says(caller_words.HARDSHIP_CALLBACK)
-        assert hear(agent, "Monday 12 baje") is True
-    assert session.said[-1] == says(caller_words.HANDOFF_CLOSE, when="Monday 2 November, दोपहर 12 बजे")
+    assert session.said[-1] == ("मैं समझ सकती हूँ। इसके बारे में हमारी टीम से कोई आपसे बात करेगा। "
+                                "अपना ध्यान रखिए, धन्यवाद।")
     cbs = store.callbacks_due(FAR)
     assert len(cbs) == 1 and cbs[0]["reason"] == "human_followup"
-    assert cbs[0]["due_at"] == datetime(2026, 11, 2, 12, 0, tzinfo=IST)
+    assert cbs[0]["due_at"] == datetime(2026, 10, 29, 11, 0, tzinfo=IST)  # the next default slot
+    assert cbs[0]["note"] == "hardship, no pay date"
     assert call.outcome == "hardship" and session.closed is True
-    assert "RULE hardship_no_date" in caplog.text and "RULE handoff_close" in caplog.text
+    assert "RULE hardship_no_date" in caplog.text
 
 
 def test_hardship_then_a_date_after_the_one_ask():
@@ -732,23 +733,21 @@ def test_hardship_then_a_date_after_the_one_ask():
     assert call.hardship == "with_date" and call.push_stopped is None
 
 
-def test_hardship_without_a_time_closes_after_two_tries():
+def test_hardship_without_a_date_the_second_answer_ends_the_call():
     agent, call, store, session = make_agent()
     confirmed(call)
     hear(agent, "medical emergency hai, paise nahi hain")
     hear(agent, "pata nahi")
-    hear(agent, "dekhte hain")
-    assert session.said[-1] == caller_words.TIME_INCOMPLETE["hi"]
-    hear(agent, "kabhi bhi")
-    assert session.said[-1] == says(caller_words.HANDOFF_CLOSE_NO_TIME) and session.closed is True
+    assert session.said[-1] == caller_words.HARDSHIP_NO_DATE_CLOSE["hi"] and session.closed is True
+    assert len(session.said) == 2  # the date question, then the close: no time question
 
 
-def test_after_hardship_without_a_date_the_guard_drops_pay_asks(monkeypatch):
+def test_after_hardship_without_a_date_the_push_is_over():
     agent, call, store, session = make_agent()
     confirmed(call)
     hear(agent, "paise nahi hain")
     hear(agent, "nahi pata")
-    assert reply_to(agent, monkeypatch, "आप कब तक pay कर पाएंगे?") == caller_words.CALLBACK_TIME_QUESTION["hi"]
+    assert call.push_stopped == "hardship" and call.callback_confirmed is not None
 
 
 @pytest.mark.parametrize("text", ["kya kanooni karwai hogi?", "legal notice bhejoge kya?",

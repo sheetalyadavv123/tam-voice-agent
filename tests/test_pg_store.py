@@ -507,15 +507,26 @@ def test_a_callback_with_a_time_saves_no_note():
 # ---- batch 7: a pay date beyond MAX_PROMISE_DAYS (from NOW, Wed 28 Oct: up to 4 Nov) ----
 
 @pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
-def test_far_date_still_too_far_saves_the_colleague_callback_with_the_offered_date():
-    rows, call = _rolled_back(["haan ji", "मैं इसको दस दिन बाद pay कर दूंगी", "नहीं, 12 को ही",
-                               "kal 4 baje"])
-    assert [tuple(r) for r in rows["callbacks"]] == [
-        ("C002", datetime(2026, 10, 29, 16, 0, tzinfo=IST), "human_followup", "open")]
-    assert [r["note"] for r in rows["callback_notes"]] == ["customer offered 12 November, beyond limit"]
+def test_far_date_still_too_far_saves_the_callback_at_the_next_default_slot():
+    rows, call = _rolled_back(["haan ji", "मैं इसको दस दिन बाद pay कर दूंगी", "नहीं, 13 को"])
+    assert [tuple(r) for r in rows["callbacks"]] == [  # NOW is 11:00, so tomorrow at 11
+        ("C002", THURSDAY_11, "human_followup", "open")]
+    assert [r["note"] for r in rows["callback_notes"]] == ["customer offered 13 November, beyond limit"]
     assert rows["session"][0]["outcome"] == "human_callback"
-    assert rows["meta"]["note"] == "customer offered 12 November, beyond limit"
+    assert rows["meta"]["note"] == "customer offered 13 November, beyond limit"
     assert rows["meta"]["handoff_requested"] is True
+    assert rows["promises"] == [] and rows["links"] == []
+
+
+@pytest.mark.skipif(not DSN, reason="set RUN_DB_TESTS=1 to run the Neon round-trip test")
+def test_hardship_with_a_far_range_saves_a_hardship_followup():
+    rows, call = _rolled_back(["haan ji", "job chali gayi, 10-15 din mein kar dungi"])
+    note = "hardship, offered 7 to 12 November, beyond limit"  # from NOW, Wed 28 Oct
+    assert [tuple(r) for r in rows["callbacks"]] == [
+        ("C002", THURSDAY_11, "human_followup", "open")]
+    assert [r["note"] for r in rows["callback_notes"]] == [note]
+    assert rows["session"][0]["outcome"] == "hardship"
+    assert rows["meta"]["note"] == note and rows["meta"]["hardship"] == "far_date"
     assert rows["promises"] == [] and rows["links"] == []
 
 
