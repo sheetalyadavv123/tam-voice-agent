@@ -23,3 +23,6 @@ logs/
 
 # Phone simulation audio
 audio_test/
+
+bridge/data/
+audio_test/
