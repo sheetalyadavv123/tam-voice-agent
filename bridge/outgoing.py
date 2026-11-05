@@ -2,9 +2,11 @@
 audio streams out as it comes, a mark follows each finished utterance, and the
 next utterance waits until the dialer sends that mark back."""
 import asyncio
+import logging
 
 from bridge.audio import CHUNK_BYTES, ulaw_to_b64
 
+log = logging.getLogger("bridge")
 
 class _Utterance:
     def __init__(self):
@@ -59,6 +61,7 @@ class Outgoing:
                 self.marks += 1
                 await self.send({"event": "mark", "call_number": self.call_number,
                                  "mark": {"name": f"utt_{self.marks}"}})
+                log.info("sentence done, mark utt_%d sent", self.marks)
                 self.waiting = True
                 self.utts.pop(0)
 

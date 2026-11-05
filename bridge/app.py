@@ -20,6 +20,7 @@ from bridge.outgoing import Outgoing
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bridge")
+logging.getLogger("livekit").setLevel(logging.WARNING)
 
 TOKEN = os.getenv("SAMPARK_TOKEN", "")
 ALLOWED_IPS = {ip.strip() for ip in os.getenv("SAMPARK_ALLOWED_IPS", "").split(",") if ip.strip()}
@@ -109,6 +110,7 @@ async def media_ws(ws: WebSocket, bot_id: str):
             elif event == "media":
                 await leg.caller_audio(b64_to_ulaw(msg["media"]["payload"]))
             elif event == "mark":
+                log.info("mark back: %s", msg.get("mark", {}).get("name"))
                 await out.mark_back()
             elif event == "stop":
                 log.info("stop from dialer: %s", msg.get("stop"))

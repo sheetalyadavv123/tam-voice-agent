@@ -38,6 +38,7 @@ class LiveKitLeg:
         self.tasks = []
         self.speaking = False
         self.last_frame = 0.0
+        self.closing = False
 
     async def start(self):
         meta = {"customer_id": self.customer_id, "call_number": self.call_number,
@@ -54,6 +55,7 @@ class LiveKitLeg:
         self.room.on("data_received", self._on_data)
         self.room.on("participant_connected", lambda p: log.info("joined room: %s", p.identity))
         self.room.on("participant_disconnected", self._on_left)
+        self.room.on("disconnected", self._on_disconnected)
         await self.room.connect(self.url, token)
         self.source = rtc.AudioSource(SAMPLE_RATE, 1)
         track = rtc.LocalAudioTrack.create_audio_track("caller", self.source)
@@ -123,13 +125,24 @@ class LiveKitLeg:
             log.info("left room: %s", participant.identity)
             asyncio.create_task(self.on_agent_left())
 
+    def _on_disconnected(self, reason=None):
+        # The agent ending the call deletes the room; treat that like the agent leaving
+        if not self.closing:
+            log.info("room closed (%s)", reason)
+            asyncio.create_task(self.on_agent_left())
+
     async def close(self):
+        self.closing = True
         for t in self.tasks:
             t.cancel()
         try:
             if self.room:
                 await self.room.disconnect()
+        except Exception:
+            log.exception("disconnect failed for %s", self.room_name)
+        try:
             async with api.LiveKitAPI(_http(self.url), self.key, self.secret) as lk:
                 await lk.room.delete_room(api.DeleteRoomRequest(room=self.room_name))
-        except Exception:
-            log.exception("could not clean up room %s", self.room_name)
+        except api.TwirpError as e:
+            if e.code != "not_found":  # already deleted by the agent: fine
+                log.warning("could not delete room %s: %s", self.room_name, e)
