@@ -1,8 +1,5 @@
-"""SAMPARK bridge: the dialer's HTTP + WebSocket bot API.
-
-Part 1: the bot echoes the caller's audio back in 2-second pieces, so the
-protocol (start, media, mark, stop) can be tested end to end.
-"""
+"""SAMPARK bridge: the dialer's HTTP + WebSocket bot API, connected to the
+LiveKit agent. One LiveKit room per call."""
 import asyncio
 import json
 import logging
@@ -12,11 +9,15 @@ import secrets
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from bridge.audio import SAMPLE_RATE, b64_to_ulaw, chunks, ulaw_to_b64
+from bridge.audio import b64_to_ulaw
+from bridge.livekit_leg import LiveKitLeg
+from bridge.outgoing import Outgoing
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bridge")
 
@@ -24,12 +25,12 @@ TOKEN = os.getenv("SAMPARK_TOKEN", "")
 ALLOWED_IPS = {ip.strip() for ip in os.getenv("SAMPARK_ALLOWED_IPS", "").split(",") if ip.strip()}
 POSTCALL_KEY = os.getenv("POSTCALL_API_KEY", "")
 PUBLIC_WS_BASE = os.getenv("PUBLIC_WS_BASE", "ws://localhost:8080")
-URL_TTL = 30  # seconds a WebSocket URL stays valid
-ECHO_BYTES = SAMPLE_RATE * 2  # echo in 2-second pieces
+URL_TTL = 30
+LAST_WORDS_WAIT = 10  # seconds to let the agent's last sentence play before "stop"
 DATA = Path(__file__).parent / "data"
 
 app = FastAPI()
-pending = {}  # bot_id -> {"payload": ..., "expires": ...}
+pending = {}
 
 
 class CallRequest(BaseModel):
@@ -52,90 +53,73 @@ def check_caller(request: Request):
 @app.post("/sampark")
 async def sampark(body: CallRequest, request: Request):
     check_caller(request)
+    customer_id = body.customer_data.get("CUSTOMER_ID") or body.customer_data.get("customer_id")
+    if not customer_id:
+        raise HTTPException(400, "customer_data.CUSTOMER_ID is required")
     bot_id = secrets.token_urlsafe(16)
-    pending[bot_id] = {"payload": body.model_dump(), "expires": time.monotonic() + URL_TTL}
-    customer = body.customer_data.get("CUSTOMER_ID", "?")
-    log.info("call %s for customer %s, bot_id %s", body.call_number, customer, bot_id)
+    pending[bot_id] = {"payload": body.model_dump(), "customer_id": str(customer_id),
+                       "expires": time.monotonic() + URL_TTL}
+    log.info("call %s for customer %s, bot_id %s", body.call_number, customer_id, bot_id)
     return {"url": f"{PUBLIC_WS_BASE}/ws/{bot_id}"}
-
-
-class CallSession:
-    def __init__(self, ws: WebSocket, call_number: str):
-        self.ws = ws
-        self.call_number = call_number
-        self.mark_back = asyncio.Event()
-        self.mark_back.set()  # nothing playing yet
-        self.seq = 0
-        self.marks = 0
-
-    async def send(self, msg: dict):
-        await self.ws.send_text(json.dumps(msg))
-
-    async def speak(self, ulaw: bytes):
-        """One piece of speech: all its 20 ms chunks, then a mark.
-        SAMPARK rule: never send new audio before the last mark comes back."""
-        await self.mark_back.wait()
-        self.mark_back.clear()
-        for chunk in chunks(ulaw):
-            self.seq += 1
-            await self.send({"event": "media", "call_number": self.call_number,
-                             "media": {"chunk_seq_no": self.seq, "timestamp": self.seq * 20,
-                                       "payload": ulaw_to_b64(chunk)}})
-        self.marks += 1
-        await self.send({"event": "mark", "call_number": self.call_number,
-                         "mark": {"name": f"utt_{self.marks}"}})
-
-    async def clear(self):
-        await self.send({"event": "clear"})
-        self.mark_back.set()
-
-    async def stop(self, reason: str = "callended"):
-        await self.send({"event": "stop", "call_number": self.call_number,
-                         "stop": {"reason": reason}})
 
 
 @app.websocket("/ws/{bot_id}")
 async def media_ws(ws: WebSocket, bot_id: str):
-    entry = pending.pop(bot_id, None)  # one-time URL
+    entry = pending.pop(bot_id, None)
     await ws.accept()
     if entry is None or entry["expires"] < time.monotonic():
         log.warning("rejected websocket: unknown, used or expired bot_id")
         await ws.close(code=4401)
         return
 
-    session = CallSession(ws, entry["payload"]["call_number"])
-    outbox: asyncio.Queue = asyncio.Queue()
+    call_number = entry["payload"]["call_number"]
 
-    async def speaker():
-        while True:
-            await session.speak(await outbox.get())
+    async def send(msg):
+        await ws.send_text(json.dumps(msg))
 
-    speaker_task = asyncio.create_task(speaker())
-    heard = bytearray()
+    out = Outgoing(send, call_number)
+    agent_gone = asyncio.Event()
+
+    async def agent_left():
+        agent_gone.set()
+
+    leg = LiveKitLeg(call_number, entry["customer_id"], on_audio=out.audio,
+                     on_utterance_end=out.end, on_clear=out.clear, on_agent_left=agent_left)
+
+    async def stop_when_agent_leaves():
+        await agent_gone.wait()
+        await out.end()
+        for _ in range(LAST_WORDS_WAIT * 10):
+            if out.idle():
+                break
+            await asyncio.sleep(0.1)
+        log.info("agent ended call %s: stop", call_number)
+        await send({"event": "stop", "call_number": call_number, "stop": {"reason": "callended"}})
+        await ws.close()
+
+    closer = asyncio.create_task(stop_when_agent_leaves())
     try:
+        await leg.start()
         while True:
             msg = json.loads(await ws.receive_text())
             event = msg.get("event")
             if event == "start":
-                fmt = msg.get("start", {}).get("media_format", {})
-                log.info("start %s, format %s", session.call_number, fmt)
+                log.info("start %s, format %s", call_number,
+                         msg.get("start", {}).get("media_format", {}))
             elif event == "media":
-                heard += b64_to_ulaw(msg["media"]["payload"])
-                if len(heard) >= ECHO_BYTES:
-                    await outbox.put(bytes(heard))
-                    heard.clear()
+                await leg.caller_audio(b64_to_ulaw(msg["media"]["payload"]))
             elif event == "mark":
-                log.info("mark back: %s", msg.get("mark", {}).get("name"))
-                session.mark_back.set()
+                await out.mark_back()
             elif event == "stop":
                 log.info("stop from dialer: %s", msg.get("stop"))
                 break
-            else:
-                log.info("unknown event: %s", event)
     except WebSocketDisconnect:
-        log.info("dialer disconnected %s", session.call_number)
+        log.info("dialer hung up %s", call_number)
+    except Exception:
+        log.exception("call %s failed", call_number)
     finally:
-        speaker_task.cancel()
+        closer.cancel()
+        await leg.close()
 
 
 @app.post("/calldata/postcall")
