@@ -3,3 +3,6 @@ uvicorn[standard]
 websockets
 httpx
 numpy
+livekit
+livekit-api
+python-dotenv
