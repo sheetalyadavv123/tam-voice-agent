@@ -2,6 +2,7 @@
 import asyncio
 import importlib.util
 import json
+import signal
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +72,35 @@ def test_stops_on_stop_and_says_call_ended(capsys):
     out = capsys.readouterr().out
     assert "[stop]" in out
     assert "Call ended." in out
+
+
+def test_ctrl_c_hangs_up_cleanly(monkeypatch, capsys):
+    """A real SIGINT while the call is up: the bridge gets "stop", the dialer prints
+    "Call ended." and cli() returns without a traceback."""
+    got = []
+
+    async def bridge_side(ws):
+        try:
+            async for raw in ws:
+                got.append(json.loads(raw)["event"])
+        except websockets.ConnectionClosed:
+            pass
+
+    async def fake_main(args):
+        async with websockets.serve(bridge_side, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            mic_q = asyncio.Queue()
+            for _ in range(5):
+                mic_q.put_nowait(np.zeros(160, np.int16))
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                asyncio.get_running_loop().call_later(0.3, signal.raise_signal, signal.SIGINT)
+                await phone_call.run_call(ws, "c1", mic_q, QuietSpeaker())
+
+    monkeypatch.setattr(phone_call, "main", fake_main)
+    phone_call.cli([])  # returns: no KeyboardInterrupt, no traceback
+    assert got[-1] == "stop"
+    assert "media" in got
+    assert "Call ended." in capsys.readouterr().out
 
 
 def test_stops_when_the_socket_closes_without_stop(capsys):

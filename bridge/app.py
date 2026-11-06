@@ -7,17 +7,21 @@ import os
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketDisconnected
+from uvicorn.protocols.utils import ClientDisconnected
+from websockets.exceptions import ConnectionClosed
 
 from bridge import logs
 from bridge.audio import b64_to_ulaw
 from bridge.livekit_leg import LiveKitLeg
 from bridge.outgoing import Outgoing
+from bridge.rooms import room_name, rooms
 from bridge.timeline import Timeline
 
 load_dotenv()
@@ -30,10 +34,25 @@ POSTCALL_KEY = os.getenv("POSTCALL_API_KEY", "")
 PUBLIC_WS_BASE = os.getenv("PUBLIC_WS_BASE", "ws://localhost:8080")
 URL_TTL = 30
 LAST_WORDS_WAIT = 10  # seconds to let the agent's last sentence play before "stop"
+# /sampark waits this long for the room; after that the URL goes out anyway, and a room
+# that then fails closes the WebSocket with 1011 (see docs/DECISIONS.md, 2026-11-06)
+ROOM_WAIT = 1.0
 DATA = Path(__file__).parent / "data"
 
-app = FastAPI()
+# The dialer is gone, whichever layer noticed first
+DISCONNECTS = (WebSocketDisconnect, WebSocketDisconnected, ClientDisconnected, ConnectionClosed,
+               ConnectionResetError, BrokenPipeError)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    await rooms.aclose()
+
+
+app = FastAPI(lifespan=lifespan)
 pending = {}
+background = set()  # keeps the expiry tasks alive
 
 
 class CallRequest(BaseModel):
@@ -59,11 +78,45 @@ async def sampark(body: CallRequest, request: Request):
     customer_id = body.customer_data.get("CUSTOMER_ID") or body.customer_data.get("customer_id")
     if not customer_id:
         raise HTTPException(400, "customer_data.CUSTOMER_ID is required")
+    call_number = body.call_number
+    timeline = Timeline(call_number)
+    name = room_name(call_number)
+    meta = {"customer_id": str(customer_id), "call_number": call_number,
+            "kind": "reminder", "source": "sampark"}
+    # The room, and with it the agent's dispatch, starts now, while the dialer connects
+    room = asyncio.create_task(rooms.create(name, meta))
+    room.add_done_callback(lambda t: t.cancelled() or t.exception() or timeline.mark("room created"))
+    done, _ = await asyncio.wait({room}, timeout=ROOM_WAIT)
+    if done and room.exception():
+        log.error("call %s: could not create room %s: %r", call_number, name, room.exception())
+        raise HTTPException(502, "could not create the call room")
     bot_id = secrets.token_urlsafe(16)
     pending[bot_id] = {"payload": body.model_dump(), "customer_id": str(customer_id),
-                       "expires": time.monotonic() + URL_TTL, "t0": time.monotonic()}
-    log.info("call %s for customer %s, bot_id %s", body.call_number, customer_id, bot_id)
+                       "expires": time.monotonic() + URL_TTL, "timeline": timeline,
+                       "room": room, "room_name": name}
+    expiry = asyncio.create_task(expire(bot_id))
+    background.add(expiry)
+    expiry.add_done_callback(background.discard)
+    log.info("call %s for customer %s, bot_id %s", call_number, customer_id, bot_id)
     return {"url": f"{PUBLIC_WS_BASE}/ws/{bot_id}"}
+
+
+async def drop_room(entry):
+    """The dialer never used this URL: remove the room so the agent doesn't wait in it."""
+    try:
+        await entry["room"]
+    except Exception:
+        return  # never created
+    await rooms.delete(entry["room_name"])
+
+
+async def expire(bot_id):
+    await asyncio.sleep(URL_TTL)
+    entry = pending.pop(bot_id, None)
+    if entry is not None:
+        log.warning("call %s: the dialer never connected, removing room %s",
+                    entry["payload"]["call_number"], entry["room_name"])
+        await drop_room(entry)
 
 
 @app.websocket("/ws/{bot_id}")
@@ -73,14 +126,25 @@ async def media_ws(ws: WebSocket, bot_id: str):
     if entry is None or entry["expires"] < time.monotonic():
         log.warning("rejected websocket: unknown, used or expired bot_id")
         await ws.close(code=4401)
+        if entry is not None:
+            await drop_room(entry)
         return
 
     call_number = entry["payload"]["call_number"]
-    timeline = Timeline(call_number, entry.get("t0"))
+    timeline = entry["timeline"]
     timeline.mark("websocket connected")
+    try:
+        await entry["room"]  # usually ready already; if not, wait for it here
+    except Exception as e:
+        log.error("call %s: could not create room %s: %r", call_number, entry["room_name"], e)
+        await ws.close(code=1011)  # the dialer must treat 1011 as a failed call
+        return
 
     async def send(msg):
-        await ws.send_text(json.dumps(msg))
+        try:
+            await ws.send_text(json.dumps(msg))
+        except DISCONNECTS:
+            pass  # the dialer is gone; the receive loop sees it and ends the call
 
     out = Outgoing(send, call_number)
     agent_gone = asyncio.Event()
@@ -106,7 +170,7 @@ async def media_ws(ws: WebSocket, bot_id: str):
         try:
             await send({"event": "stop", "call_number": call_number, "stop": {"reason": "callended"}})
             await ws.close()
-        except (WebSocketDisconnect, WebSocketDisconnected, RuntimeError):
+        except (*DISCONNECTS, RuntimeError):
             pass  # the dialer hung up at the same moment: nothing left to tell it
 
     closer = asyncio.create_task(stop_when_agent_leaves())
@@ -126,13 +190,11 @@ async def media_ws(ws: WebSocket, bot_id: str):
             elif event == "stop":
                 log.info("stop from dialer: %s", msg.get("stop"))
                 break
-    except (WebSocketDisconnect, WebSocketDisconnected) as e:
+    except DISCONNECTS:
         if ended_by_us:
             log.info("call %s ended", call_number)
-        elif isinstance(e, WebSocketDisconnect):
-            log.info("dialer hung up %s", call_number)
         else:
-            log.exception("call %s failed", call_number)
+            log.info("dialer hung up %s", call_number)
     except Exception:
         log.exception("call %s failed", call_number)
     finally:

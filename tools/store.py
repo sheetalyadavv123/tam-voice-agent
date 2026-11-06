@@ -18,6 +18,10 @@ LINK_BASE_URL = "https://pay.example.test/l/"  # .test is reserved, so it never 
 CHANNELS = {"sms", "whatsapp"}
 PROMISE_STATUSES = {"open", "kept", "broken", "cancelled"}
 CALLBACK_STATUSES = {"open", "done", "cancelled"}
+# Set by the code, never by the AI (not in collection_tools.OUTCOMES): the agent was in the
+# room but the caller never joined (SAMPARK: the dialer never connected). Nobody spoke, so
+# it says nothing about the customer or the number.
+NO_CALLER = "caller_never_joined"
 
 
 def phone_hash(phone):
@@ -99,12 +103,14 @@ class MemoryStore:
 
     def number_check_hold(self, customer_id):
         """The wrong-number attempt that holds this customer's calls, or None.
-        The hold is the latest finished attempt (one with an outcome; a call in progress
-        or one the scheduler just planned doesn't count) when it was a wrong number, and
+        The hold is the latest finished attempt (one with an outcome; a call in progress,
+        one the scheduler just planned, or one where the caller never joined doesn't count)
+        when it was a wrong number, and
         ends when a person marked the number checked (scripts/clear_number_check.py) or
         the phone number in the company records changed since that call. An attempt saved
         before phone hashes were kept can't show a change, so only a person clears it."""
-        done = [a for a in self._attempts if a["customer_id"] == customer_id and a["outcome"]]
+        done = [a for a in self._attempts if a["customer_id"] == customer_id
+                and a["outcome"] and a["outcome"] != NO_CALLER]
         if not done:
             return None
         latest = max(done, key=lambda a: a["at"])

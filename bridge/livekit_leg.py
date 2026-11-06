@@ -1,5 +1,6 @@
-"""One call's link to LiveKit. The dialer's caller joins a room as a participant,
-the agent joins the same room, and audio flows both ways at 8 kHz."""
+"""One call's link to LiveKit. The room already exists (created at /sampark, see
+bridge/rooms.py); the dialer's caller joins it as a participant, the agent joins the
+same room, and audio flows both ways at 8 kHz."""
 import asyncio
 import json
 import logging
@@ -10,21 +11,12 @@ import numpy as np
 from livekit import api, rtc
 
 from bridge.audio import SAMPLE_RATE, pcm16_to_ulaw, ulaw_to_pcm16
+from bridge.rooms import room_name, rooms
 from bridge.timeline import Timeline
 
 log = logging.getLogger("bridge")
 SILENCE_RMS = 200          # a frame quieter than this counts as silence
 END_OF_UTTERANCE_MS = 500  # this much silence after speech ends a sentence (then a mark)
-
-
-def _http(url: str) -> str:
-    return url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
-
-
-def room_gone(e: api.TwirpError) -> bool:
-    """The room was already deleted (the agent ends a call by deleting it). LiveKit
-    answers 404; the body is not always Twirp JSON, so the code can be "unknown"."""
-    return e.status == 404 or e.code == api.TwirpErrorCode.NOT_FOUND
 
 
 class LiveKitLeg:
@@ -39,7 +31,7 @@ class LiveKitLeg:
         self.url = os.environ["LIVEKIT_URL"]
         self.key = os.environ["LIVEKIT_API_KEY"]
         self.secret = os.environ["LIVEKIT_API_SECRET"]
-        self.room_name = f"sampark-{call_number}"
+        self.room_name = room_name(call_number)
         self.identity = f"caller-{call_number}"
         self.room = None
         self.source = None
@@ -50,12 +42,6 @@ class LiveKitLeg:
         self.timeline = timeline or Timeline(call_number)
 
     async def start(self):
-        meta = {"customer_id": self.customer_id, "call_number": self.call_number,
-                "kind": "reminder", "source": "sampark"}
-        async with api.LiveKitAPI(_http(self.url), self.key, self.secret) as lk:
-            await lk.room.create_room(api.CreateRoomRequest(
-                name=self.room_name, metadata=json.dumps(meta), empty_timeout=60))
-        self.timeline.mark("room created")
         token = (api.AccessToken(self.key, self.secret)
                  .with_identity(self.identity).with_name("caller")
                  .with_grants(api.VideoGrants(room_join=True, room=self.room_name))
@@ -160,11 +146,4 @@ class LiveKitLeg:
                 await self.room.disconnect()
         except Exception:
             log.exception("disconnect failed for %s", self.room_name)
-        try:
-            async with api.LiveKitAPI(_http(self.url), self.key, self.secret) as lk:
-                await lk.room.delete_room(api.DeleteRoomRequest(room=self.room_name))
-        except api.TwirpError as e:
-            if room_gone(e):
-                log.info("room %s already deleted", self.room_name)
-            else:
-                log.warning("could not delete room %s: %s", self.room_name, e)
+        await rooms.delete(self.room_name)

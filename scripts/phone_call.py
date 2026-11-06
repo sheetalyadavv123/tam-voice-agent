@@ -52,9 +52,19 @@ class Speaker:
             return not self.buf
 
 
+async def hang_up(ws, call_number):
+    """Ctrl+C: tell the bridge we hung up, as a real dialer does, then close."""
+    try:
+        await asyncio.wait_for(ws.send(json.dumps({
+            "event": "stop", "call_number": call_number, "stop": {"reason": "hangup"}})), 1)
+        await asyncio.wait_for(ws.close(), 2)
+    except (websockets.ConnectionClosed, asyncio.TimeoutError, OSError):
+        pass
+
+
 async def run_call(ws, call_number, mic_q, speaker):
     """Send mic audio and play the agent until the bridge sends "stop" or the socket
-    closes. Then stop sending and return."""
+    closes, then stop sending and return. Cancelled (Ctrl+C): hang up first."""
     ended = asyncio.Event()
 
     async def listen():
@@ -98,11 +108,16 @@ async def run_call(ws, call_number, mic_q, speaker):
                                                     "payload": base64.b64encode(pcm16_to_ulaw(pcm8)).decode()}}))
             except websockets.ConnectionClosed:
                 break
+    except asyncio.CancelledError:
+        await hang_up(ws, call_number)
+        raise
     finally:
-        if not listener.done():
-            listener.cancel()
-        await asyncio.gather(listener, return_exceptions=True)
-    print("Call ended.")
+        try:
+            if not listener.done():
+                listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
+        finally:
+            print("Call ended.")
 
 
 async def main(args):
@@ -140,9 +155,16 @@ async def main(args):
         speaker.stream.stop()
 
 
-if __name__ == "__main__":
+def cli(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--bridge", default="http://localhost:8080")
     p.add_argument("--token", default="")
     p.add_argument("--customer", default="C002")
-    asyncio.run(main(p.parse_args()))
+    try:
+        asyncio.run(main(p.parse_args(argv)))
+    except KeyboardInterrupt:
+        pass  # Ctrl+C: run_call already hung up and said "Call ended."
+
+
+if __name__ == "__main__":
+    cli()
