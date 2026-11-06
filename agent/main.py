@@ -38,7 +38,7 @@ from tools.relative_dates import last_offer, single
 from tools.language import LanguageTracker, turn_language
 from tools.speech_guard import ReplyGuard
 from tools.third_party import ThirdPartyFlow, time_outside_line
-from tools.store import MemoryStore
+from tools.store import NO_CALLER, MemoryStore
 from tools.pg_store import PostgresStore
 
 logger = logging.getLogger("tam-voice-agent")
@@ -50,6 +50,10 @@ LOG_KEYS = ("ok", "next", "error", "reason", "status", "saved", "sent", "verifie
             "requested", "locked", "duplicate", "source", "loan_closed")
 REFUSED_KEYS = ("ok", "saved", "sent", "verified", "requested")
 USER_AWAY_SECONDS = 8
+# Below the bridge's URL_TTL (30 s from /sampark, after which it deletes an unused room):
+# the agent's wait starts seconds after /sampark, so a 30 s wait would outlive the room.
+# If the room still goes first (a slow start), finish() records the same outcome.
+CALLER_WAIT_SECONDS = 25
 
 
 def build_llm():
@@ -121,8 +125,35 @@ async def build_store(customer_id):
     return None, False
 
 
+async def wait_for_caller(ctx, timeout=None):
+    """The greeting waits until the caller is in the room. SAMPARK rooms are created at
+    /sampark, while the dialer is still connecting, so the agent can get there first and
+    session.start() doesn't wait for anyone. False if nobody comes within timeout."""
+    if ctx.is_fake_job():  # console mode: a mock room, the caller is the terminal
+        return True
+    try:
+        participant = await asyncio.wait_for(ctx.wait_for_participant(),
+                                             CALLER_WAIT_SECONDS if timeout is None else timeout)
+    except asyncio.TimeoutError:
+        return False
+    logger.info("RULE greet_after_join: %s is in the room", participant.identity)
+    return True
+
+
 def pick_target(ctx):
-    """Which customer is this call for? Job metadata wins; otherwise the test setting."""
+    """Which customer is this call for? Room metadata (SAMPARK calls) wins, then job
+    metadata, then the test setting."""
+    meta = {}
+    room = getattr(ctx.job, "room", None)
+    try:
+        meta = json.loads(getattr(room, "metadata", "") or "{}")
+    except ValueError:
+        pass
+    if meta.get("customer_id"):
+        kind = "followup" if meta.get("kind") == "followup" else "reminder"
+        logger.info("RULE target_from_room: customer %s, call %s",
+                    meta["customer_id"], meta.get("call_number"))
+        return meta["customer_id"], kind
     meta = {}
     try:
         meta = json.loads(ctx.job.metadata or "{}")
@@ -908,8 +939,22 @@ async def entrypoint(ctx: agents.JobContext):
     def _on_metrics(ev: MetricsCollectedEvent):
         metrics.log_metrics(ev.metrics)
 
+    @session.on("agent_state_changed")
+    def _on_agent_state(ev):
+        # Customer talked over the agent: the dialer must drop audio it hasn't played yet
+        if ev.old_state == "speaking" and session.user_state == "speaking":
+            asyncio.create_task(ctx.room.local_participant.publish_data(
+                json.dumps({"type": "clear"}).encode(), topic="sampark", reliable=True))
+
+    caller_joined = False  # set once the caller is in the room; finish() reads it
+
     async def finish():
         ended_at = datetime.now(timezone.utc)
+        if not caller_joined and call.outcome is None:
+            # Timed out, or the room was deleted first (the bridge drops unused rooms):
+            # either way the job ends here, so this is the one place that records it
+            call.outcome, call.note = NO_CALLER, "caller never joined the room"
+            logger.warning("RULE no_caller: outcome %s", NO_CALLER)
         if call.finalize_outcome():
             logger.warning("RULE outcome_filled_by_code: %s", call.outcome)
         store.set_attempt_outcome(str(session_id), call.outcome)
@@ -924,8 +969,8 @@ async def entrypoint(ctx: agents.JobContext):
                     json.dumps(store.changes(), default=str, ensure_ascii=False, indent=2),
                     encoding="utf-8")
         turns = db.extract_turns(session.history)
-        if not turns:
-            return
+        if not turns and caller_joined:
+            return  # a call nobody spoke in; a no-caller call is still saved, for its outcome
         if gate == "memory":  # the database doesn't match the code: transcript to a file
             TRANSCRIPT_DIR.mkdir(exist_ok=True)
             payload = [{**t, "created_at": t["created_at"].isoformat()} for t in turns]
@@ -984,6 +1029,11 @@ async def entrypoint(ctx: agents.JobContext):
             ),
         ),
     )
+    if not await wait_for_caller(ctx):
+        logger.warning("nobody joined within %ss, ending without a greeting", CALLER_WAIT_SECONDS)
+        ctx.shutdown("caller never joined")  # finish() runs on shutdown and saves the call
+        return
+    caller_joined = True
     if call.language == "hi":
         greeting = (f"नमस्ते, मैं {config.COMPANY_NAME} की AI असिस्टेंट बोल रही हूँ। "
                     f"यह कॉल रिकॉर्ड हो सकती है। क्या मेरी बात {call.first_name} जी से हो रही है?")

@@ -210,3 +210,49 @@ runs the result:
 `_hardship_no_date`), `tools/far_date.py` (`hardship_no_date_close`),
 `tools/collection_tools.py` (`withdraw_promise`), `tools/caller_words.py` (`HARDSHIP`,
 `HARDSHIP_DATE_ASK_TP`, `HARDSHIP_NO_DATE_CLOSE`).
+
+## 2026-11-06: SAMPARK calls: the room is made at /sampark; close code 1011 is a failed call
+
+**Decision.** The bridge creates the call's LiveKit room (which dispatches the agent) when
+the dialer calls `/sampark`, so the room and the agent's start overlap with the dialer
+connecting. One LiveKit API client serves the whole bridge process.
+
+- `/sampark` waits up to `ROOM_WAIT` (1.0 s) for the room. A creation that fails within
+  that time gets an HTTP 502 and no URL. Room creation usually takes about 1.6 s, so most
+  of the time the URL goes out before the result is known.
+- The WebSocket handler waits for the room if it isn't ready yet. If creation fails
+  after the URL went out, the bridge closes the WebSocket with **code 1011** without
+  sending any event.
+- A URL that isn't used within 30 s has its room removed, so the agent doesn't wait in an
+  empty call.
+
+**Rule (dialer contract).** The dialer must treat a WebSocket closed with code 1011 as a
+**failed call** (the bot never answered), not as a call that ended: retry or mark it
+failed. The other closes: 4401 is an unknown, used or expired URL; a `stop` event with
+reason `callended` before the close is a normal end.
+
+**Rule (agent).** The greeting waits until the caller is in the room, because the room can
+now exist before the caller joins and the agent's `session.start()` doesn't wait for
+anyone. Console mode doesn't wait.
+
+- The wait is `CALLER_WAIT_SECONDS` (25 s), below the bridge's 30 s: the agent's wait starts
+  seconds after `/sampark`, and the bridge deletes an unused room 30 s after it.
+- Nobody comes: no greeting, the job ends, and the call is saved with the outcome
+  **`caller_never_joined`** and the note "caller never joined the room". The same happens
+  when the room is deleted first (a slow start): the job's shutdown hook, registered before
+  the wait, records it. The call record is saved even though it has no turns.
+- `caller_never_joined` is set by the code only; the AI can't choose it. It is not
+  `not_available`, which means the customer couldn't talk, so reports keep the two apart.
+  The attempt still counts toward the daily and weekly limits (those count every attempt,
+  whatever its outcome; the phone may have rung). It doesn't lift a wrong-number hold: the
+  hold looks at the latest attempt with an outcome other than `caller_never_joined`.
+
+**Why.** In a live test the room took 3.2 s to create after the dialer connected, all of
+it on the call's critical path. Created at `/sampark`, it is ready before the dialer
+connects (first agent audio 4.2 to 5.2 s after `/sampark`, from about 6.5 s). Waiting for
+the result in `/sampark` would add about 0.6 s to every call to report a rare failure, so
+the late failure is reported on the WebSocket instead.
+
+**Where.** `bridge/app.py` (`ROOM_WAIT`, `sampark`, `media_ws`, `expire`), `bridge/rooms.py`,
+`agent/main.py` (`wait_for_caller`, `CALLER_WAIT_SECONDS`, `finish`), `tools/store.py`
+(`NO_CALLER`, `number_check_hold`).
