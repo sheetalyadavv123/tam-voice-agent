@@ -10,6 +10,7 @@ import numpy as np
 from livekit import api, rtc
 
 from bridge.audio import SAMPLE_RATE, pcm16_to_ulaw, ulaw_to_pcm16
+from bridge.timeline import Timeline
 
 log = logging.getLogger("bridge")
 SILENCE_RMS = 200          # a frame quieter than this counts as silence
@@ -20,8 +21,15 @@ def _http(url: str) -> str:
     return url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
 
 
+def room_gone(e: api.TwirpError) -> bool:
+    """The room was already deleted (the agent ends a call by deleting it). LiveKit
+    answers 404; the body is not always Twirp JSON, so the code can be "unknown"."""
+    return e.status == 404 or e.code == api.TwirpErrorCode.NOT_FOUND
+
+
 class LiveKitLeg:
-    def __init__(self, call_number, customer_id, on_audio, on_utterance_end, on_clear, on_agent_left):
+    def __init__(self, call_number, customer_id, on_audio, on_utterance_end, on_clear, on_agent_left,
+                 timeline=None):
         self.call_number = call_number
         self.customer_id = customer_id
         self.on_audio = on_audio
@@ -39,6 +47,7 @@ class LiveKitLeg:
         self.speaking = False
         self.last_frame = 0.0
         self.closing = False
+        self.timeline = timeline or Timeline(call_number)
 
     async def start(self):
         meta = {"customer_id": self.customer_id, "call_number": self.call_number,
@@ -46,6 +55,7 @@ class LiveKitLeg:
         async with api.LiveKitAPI(_http(self.url), self.key, self.secret) as lk:
             await lk.room.create_room(api.CreateRoomRequest(
                 name=self.room_name, metadata=json.dumps(meta), empty_timeout=60))
+        self.timeline.mark("room created")
         token = (api.AccessToken(self.key, self.secret)
                  .with_identity(self.identity).with_name("caller")
                  .with_grants(api.VideoGrants(room_join=True, room=self.room_name))
@@ -53,10 +63,13 @@ class LiveKitLeg:
         self.room = rtc.Room()
         self.room.on("track_subscribed", self._on_track)
         self.room.on("data_received", self._on_data)
-        self.room.on("participant_connected", lambda p: log.info("joined room: %s", p.identity))
+        self.room.on("participant_connected", self._on_joined)
         self.room.on("participant_disconnected", self._on_left)
         self.room.on("disconnected", self._on_disconnected)
         await self.room.connect(self.url, token)
+        self.timeline.mark("caller joined")
+        for p in list(self.room.remote_participants.values()):  # the agent got in first
+            self._on_joined(p)
         self.source = rtc.AudioSource(SAMPLE_RATE, 1)
         track = rtc.LocalAudioTrack.create_audio_track("caller", self.source)
         await self.room.local_participant.publish_track(
@@ -71,9 +84,15 @@ class LiveKitLeg:
         pcm = ulaw_to_pcm16(ulaw)
         await self.source.capture_frame(rtc.AudioFrame(pcm.tobytes(), SAMPLE_RATE, 1, len(pcm)))
 
+    def _on_joined(self, participant):
+        log.info("joined room: %s", participant.identity)
+        if participant.identity != self.identity:
+            self.timeline.mark("agent joined")
+
     def _on_track(self, track, publication, participant):
         if track.kind == rtc.TrackKind.KIND_AUDIO and participant.identity != self.identity:
             log.info("agent audio from %s", participant.identity)
+            self.timeline.mark("agent audio track")
             self.tasks.append(asyncio.create_task(self._read_agent(track)))
 
     async def _read_agent(self, track):
@@ -88,6 +107,7 @@ class LiveKitLeg:
             ulaw = pcm16_to_ulaw(pcm)
             loud = np.sqrt(np.mean(pcm.astype(np.float32) ** 2)) >= SILENCE_RMS
             if loud:
+                self.timeline.mark("first agent audio")
                 if quiet:  # a short pause inside a sentence: keep it
                     await self.on_audio(bytes(quiet))
                     quiet.clear()
@@ -144,5 +164,7 @@ class LiveKitLeg:
             async with api.LiveKitAPI(_http(self.url), self.key, self.secret) as lk:
                 await lk.room.delete_room(api.DeleteRoomRequest(room=self.room_name))
         except api.TwirpError as e:
-            if e.code != "not_found":  # already deleted by the agent: fine
+            if room_gone(e):
+                log.info("room %s already deleted", self.room_name)
+            else:
                 log.warning("could not delete room %s: %s", self.room_name, e)

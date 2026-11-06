@@ -14,7 +14,6 @@ from pathlib import Path
 
 import httpx
 import numpy as np
-import sounddevice as sd
 import websockets
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -27,6 +26,7 @@ BLOCK = 160 * FACTOR          # 20 ms at 48 kHz
 
 class Speaker:
     def __init__(self):
+        import sounddevice as sd  # here, not at the top: tests import this file without audio devices
         self.buf = bytearray()
         self.lock = threading.Lock()
         self.stream = sd.OutputStream(samplerate=DEVICE_RATE, channels=1, dtype="int16",
@@ -52,7 +52,61 @@ class Speaker:
             return not self.buf
 
 
+async def run_call(ws, call_number, mic_q, speaker):
+    """Send mic audio and play the agent until the bridge sends "stop" or the socket
+    closes. Then stop sending and return."""
+    ended = asyncio.Event()
+
+    async def listen():
+        try:
+            async for raw in ws:
+                msg = json.loads(raw)
+                event = msg.get("event")
+                if event == "media":
+                    speaker.add(ulaw_to_pcm16(base64.b64decode(msg["media"]["payload"])))
+                elif event == "mark":
+                    while not speaker.empty():
+                        await asyncio.sleep(0.02)
+                    await ws.send(raw)
+                elif event == "clear":
+                    speaker.clear()
+                    print("[clear]")
+                elif event == "xfer":
+                    print("[xfer]", msg.get("xfer"))
+                elif event == "stop":
+                    print("[stop]", msg.get("stop"))
+                    return
+        except websockets.ConnectionClosed:
+            pass
+        finally:
+            ended.set()
+
+    listener = asyncio.create_task(listen())
+    seq = 0
+    try:
+        while not ended.is_set():
+            try:
+                pcm8 = await asyncio.wait_for(mic_q.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            if ended.is_set():
+                break
+            seq += 1
+            try:
+                await ws.send(json.dumps({"event": "media", "call_number": call_number,
+                                          "media": {"chunk_seq_no": seq, "timestamp": seq * 20,
+                                                    "payload": base64.b64encode(pcm16_to_ulaw(pcm8)).decode()}}))
+            except websockets.ConnectionClosed:
+                break
+    finally:
+        if not listener.done():
+            listener.cancel()
+        await asyncio.gather(listener, return_exceptions=True)
+    print("Call ended.")
+
+
 async def main(args):
+    import sounddevice as sd
     call_number = f"live-{int(time.time())}"
     payload = {"to_number": "9999999999", "call_number": call_number, "campaign_id": "TEST",
                "customer_data": {"CUSTOMER_ID": args.customer}}
@@ -71,48 +125,19 @@ async def main(args):
 
     speaker = Speaker()
     speaker.stream.start()
-    async with websockets.connect(url) as ws:
-        await ws.send(json.dumps({
-            "event": "start", "call_number": call_number, "campaign_id": "TEST",
-            "bot_id": url.rsplit("/", 1)[-1],
-            "start": {"to": payload["to_number"], "customer_data": payload["customer_data"],
-                      "media_format": {"encoding": "mulaw", "sample_rate": "8000", "bit_rate": "8"}}}))
-
-        async def listen():
-            async for raw in ws:
-                msg = json.loads(raw)
-                event = msg.get("event")
-                if event == "media":
-                    speaker.add(ulaw_to_pcm16(base64.b64decode(msg["media"]["payload"])))
-                elif event == "mark":
-                    while not speaker.empty():
-                        await asyncio.sleep(0.02)
-                    await ws.send(raw)
-                elif event == "clear":
-                    speaker.clear()
-                    print("[clear]")
-                elif event == "xfer":
-                    print("[xfer]", msg.get("xfer"))
-                elif event == "stop":
-                    print("[stop]", msg.get("stop"))
-                    return
-
-        listener = asyncio.create_task(listen())
-        seq = 0
-        with sd.InputStream(samplerate=DEVICE_RATE, channels=1, dtype="int16",
-                            blocksize=BLOCK, callback=mic):
-            print("Call connected. Talk now. Ctrl+C to hang up.")
-            while not listener.done():
-                try:
-                    pcm8 = await asyncio.wait_for(mic_q.get(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    continue
-                seq += 1
-                await ws.send(json.dumps({"event": "media", "call_number": call_number,
-                                          "media": {"chunk_seq_no": seq, "timestamp": seq * 20,
-                                                    "payload": base64.b64encode(pcm16_to_ulaw(pcm8)).decode()}}))
-    speaker.stream.stop()
-    print("Call ended.")
+    try:
+        async with websockets.connect(url) as ws:
+            await ws.send(json.dumps({
+                "event": "start", "call_number": call_number, "campaign_id": "TEST",
+                "bot_id": url.rsplit("/", 1)[-1],
+                "start": {"to": payload["to_number"], "customer_data": payload["customer_data"],
+                          "media_format": {"encoding": "mulaw", "sample_rate": "8000", "bit_rate": "8"}}}))
+            with sd.InputStream(samplerate=DEVICE_RATE, channels=1, dtype="int16",
+                                blocksize=BLOCK, callback=mic):
+                print("Call connected. Talk now. Ctrl+C to hang up.")
+                await run_call(ws, call_number, mic_q, speaker)
+    finally:
+        speaker.stream.stop()
 
 
 if __name__ == "__main__":

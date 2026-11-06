@@ -12,15 +12,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
+from starlette.websockets import WebSocketDisconnected
 
+from bridge import logs
 from bridge.audio import b64_to_ulaw
 from bridge.livekit_leg import LiveKitLeg
 from bridge.outgoing import Outgoing
+from bridge.timeline import Timeline
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logs.setup()
 log = logging.getLogger("bridge")
-logging.getLogger("livekit").setLevel(logging.WARNING)
 
 TOKEN = os.getenv("SAMPARK_TOKEN", "")
 ALLOWED_IPS = {ip.strip() for ip in os.getenv("SAMPARK_ALLOWED_IPS", "").split(",") if ip.strip()}
@@ -59,7 +61,7 @@ async def sampark(body: CallRequest, request: Request):
         raise HTTPException(400, "customer_data.CUSTOMER_ID is required")
     bot_id = secrets.token_urlsafe(16)
     pending[bot_id] = {"payload": body.model_dump(), "customer_id": str(customer_id),
-                       "expires": time.monotonic() + URL_TTL}
+                       "expires": time.monotonic() + URL_TTL, "t0": time.monotonic()}
     log.info("call %s for customer %s, bot_id %s", body.call_number, customer_id, bot_id)
     return {"url": f"{PUBLIC_WS_BASE}/ws/{bot_id}"}
 
@@ -74,20 +76,25 @@ async def media_ws(ws: WebSocket, bot_id: str):
         return
 
     call_number = entry["payload"]["call_number"]
+    timeline = Timeline(call_number, entry.get("t0"))
+    timeline.mark("websocket connected")
 
     async def send(msg):
         await ws.send_text(json.dumps(msg))
 
     out = Outgoing(send, call_number)
     agent_gone = asyncio.Event()
+    ended_by_us = False  # we sent "stop" and closed the socket: a disconnect after that is normal
 
     async def agent_left():
         agent_gone.set()
 
     leg = LiveKitLeg(call_number, entry["customer_id"], on_audio=out.audio,
-                     on_utterance_end=out.end, on_clear=out.clear, on_agent_left=agent_left)
+                     on_utterance_end=out.end, on_clear=out.clear, on_agent_left=agent_left,
+                     timeline=timeline)
 
     async def stop_when_agent_leaves():
+        nonlocal ended_by_us
         await agent_gone.wait()
         await out.end()
         for _ in range(LAST_WORDS_WAIT * 10):
@@ -95,8 +102,12 @@ async def media_ws(ws: WebSocket, bot_id: str):
                 break
             await asyncio.sleep(0.1)
         log.info("agent ended call %s: stop", call_number)
-        await send({"event": "stop", "call_number": call_number, "stop": {"reason": "callended"}})
-        await ws.close()
+        ended_by_us = True
+        try:
+            await send({"event": "stop", "call_number": call_number, "stop": {"reason": "callended"}})
+            await ws.close()
+        except (WebSocketDisconnect, WebSocketDisconnected, RuntimeError):
+            pass  # the dialer hung up at the same moment: nothing left to tell it
 
     closer = asyncio.create_task(stop_when_agent_leaves())
     try:
@@ -115,8 +126,13 @@ async def media_ws(ws: WebSocket, bot_id: str):
             elif event == "stop":
                 log.info("stop from dialer: %s", msg.get("stop"))
                 break
-    except WebSocketDisconnect:
-        log.info("dialer hung up %s", call_number)
+    except (WebSocketDisconnect, WebSocketDisconnected) as e:
+        if ended_by_us:
+            log.info("call %s ended", call_number)
+        elif isinstance(e, WebSocketDisconnect):
+            log.info("dialer hung up %s", call_number)
+        else:
+            log.exception("call %s failed", call_number)
     except Exception:
         log.exception("call %s failed", call_number)
     finally:
