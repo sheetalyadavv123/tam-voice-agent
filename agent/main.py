@@ -141,7 +141,19 @@ async def wait_for_caller(ctx, timeout=None):
 
 
 def pick_target(ctx):
-    """Which customer is this call for? Job metadata wins; otherwise the test setting."""
+    """Which customer is this call for? Room metadata (SAMPARK calls) wins, then job
+    metadata, then the test setting."""
+    meta = {}
+    room = getattr(ctx.job, "room", None)
+    try:
+        meta = json.loads(getattr(room, "metadata", "") or "{}")
+    except ValueError:
+        pass
+    if meta.get("customer_id"):
+        kind = "followup" if meta.get("kind") == "followup" else "reminder"
+        logger.info("RULE target_from_room: customer %s, call %s",
+                    meta["customer_id"], meta.get("call_number"))
+        return meta["customer_id"], kind
     meta = {}
     try:
         meta = json.loads(ctx.job.metadata or "{}")
@@ -926,6 +938,13 @@ async def entrypoint(ctx: agents.JobContext):
     @session.on("metrics_collected")
     def _on_metrics(ev: MetricsCollectedEvent):
         metrics.log_metrics(ev.metrics)
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(ev):
+        # Customer talked over the agent: the dialer must drop audio it hasn't played yet
+        if ev.old_state == "speaking" and session.user_state == "speaking":
+            asyncio.create_task(ctx.room.local_participant.publish_data(
+                json.dumps({"type": "clear"}).encode(), topic="sampark", reliable=True))
 
     caller_joined = False  # set once the caller is in the room; finish() reads it
 
